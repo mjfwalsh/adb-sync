@@ -15,4 +15,4 @@ This project originally started out as a patch of Google's [adb-sync](https://gi
 * Just copy the script to somewhere in your path
 
 ### Usage
-* Run `abd-sync --help`
+* Run `adb-sync --help`
