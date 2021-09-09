@@ -1,0 +1,1170 @@
+#!/usr/bin/env python3 -b
+
+# Copyright 2021 Michael J. Walsh
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#		http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+from typing import List, Tuple
+
+import argparse
+import datetime
+import hashlib
+import io
+import os
+import shlex
+import stat
+import subprocess
+import time
+import posixpath
+import sys
+import re
+
+# This prevents errors when printing malformed utf8 filenames to stdout
+if sys.stdout.encoding == 'UTF-8':
+	sys.stdout.reconfigure(error='replace')
+
+# Functions to handle unicode normalisation on MacOS
+# Mac uses a subset of unicode in filenames
+if hasattr(os, 'uname') and os.uname().sysname == 'Darwin':
+	import unicodedata
+
+	def mac2linux(s: str) -> str:
+		return unicodedata.normalize('NFC', s)
+
+	def linux2mac(s: str) -> str:
+		return unicodedata.ucd_3_2_0.normalize('NFD', s)
+else:
+	def mac2linux(s: str) -> str:
+		return s
+
+	def linux2mac(s: str) -> str:
+		return s
+
+
+# logging and error handling
+class log(object):
+	DEBUG = 1
+	QUIET = 2
+	NORMAL = 3
+
+	adb_stdout = None
+	level = NORMAL
+
+	@staticmethod
+	def ignore(*argv, **kwargs) -> None:
+		pass
+
+	@staticmethod
+	def exit(*argv, **kwargs) -> None:
+		print(*argv, **kwargs)
+		print("Aborting sync...")
+		exit(1)
+
+	@staticmethod
+	def log_except(ex: Exception, *argv, **kwargs) -> None:
+		if log.level == log.DEBUG:
+			print(*argv, **kwargs)
+			print("Aborting sync...")
+			raise ex
+		else:
+			s = str(ex)
+			if len(s) > 0:
+				print(s)
+			log.exit(*argv, **kwargs)
+
+	@staticmethod
+	def set_level(level: int) -> None:
+		log.level = level
+		if level == log.DEBUG:
+			log.info = print
+			log.debug = print
+			log.err = print
+			log.adb_stdout = None
+		elif level == log.QUIET:
+			log.info = log.ignore
+			log.debug = log.ignore
+			log.err = print
+			log.adb_stdout = subprocess.DEVNULL
+		else:
+			log.info = print
+			log.debug = log.ignore
+			log.err = print
+			log.adb_stdout = None
+
+	# defaults
+	info = print
+	debug = ignore
+	err = print
+
+
+# some global vars
+class g(object):
+	adb_cmd = ['adb']
+	dry_run = False
+
+
+# class to handle file metadata
+class File(object):
+	def __init__(self, name: str, mode: int, mtime: int, size: int, ignore: bool = False) -> None:
+		self.name = name
+		self.ignore = ignore
+
+		type_bits = mode >> 12
+
+		if type_bits == 4:
+			self.type = 'd'
+		elif type_bits == 8:
+			self.type = 'f'
+		elif type_bits == 10:
+			self.type = 'l'
+		else:
+			log.exit("Found unsupported file type:", type_bits)
+
+		# FAT is only accurate to even numbered seconds
+		self.mtime = mtime - (mtime % 2)
+
+		# Size in bytes
+		self.size = size
+
+	def __eq__(self, other: File) -> bool:
+		return self.name == other.name
+
+	def __hash__(self) -> int:
+		return hash(self.name)
+
+	@staticmethod
+	def sort_by_name(o: File) -> str:
+		return o.name
+
+	@staticmethod
+	def sort_by_size_and_time(o: File) -> Tuple[int, int]:
+		if o.ignore or o.type != 'f':
+			return 0, 0
+		else:
+			return o.size, o.mtime
+
+
+# converts wildcard search to regular expressions and then
+# stores the compiled REs for subsequent use
+class wile_card_search(object):
+	def __init__(self, patterns) -> None:
+		self.patterns = [self.wild2re(pattern) for pattern in patterns]
+		if len(self.patterns) > 0:
+			self.active = True
+		else:
+			self.active = False
+
+	@staticmethod
+	def wild2re(pattern: str) -> re.Pattern:
+		out = []
+		for part in pattern.split(r'\*'):
+			subout = []
+			for subpart in part.split(r'*'):
+				subout.append(re.escape(subpart))
+			out.append(r'[^/]*'.join(subout))
+		return re.compile(r'^' + r'\*'.join(out) + r'$')
+
+	def match(self, search_string) -> bool:
+		for pattern in self.patterns:
+			if pattern.search(search_string):
+				return True
+		return False
+
+
+# class for generic file functions
+# not for direct use
+class common_utils(object):
+
+	# Error if source dir does not exist,
+	# create target dir if it doesn't exist, and
+	# chdir to base dir
+	def __init__(self, base_dir: str) -> None:
+		if self.isdir(base_dir):
+			self.base_dir_exists = True
+		elif self.is_target_folder:
+			if g.dry_run:
+				# in dry run mode we pretend to create the base dir but recall
+				# the true position
+				log.info("Created target dir", base_dir)
+				self.base_dir_exists = False
+			else:
+				# attempt to create base dir
+				try:
+					self.mkdir(base_dir)
+					log.info("Created target directory", base_dir)
+					self.base_dir_exists = True
+				except OSError as e:
+					log.exit_except(e, "Failed to create target dir", base_dir)
+		else:
+			log.exit("Source dir does not exist")
+
+		# change directory
+		if self.base_dir_exists:
+			try:
+				self.cd(base_dir)
+			except OSError as e:
+				log.exit_except(e, "Failed to change directory to", base_dir)
+
+		# Record variable
+		self.base_dir = base_dir
+
+	# delete files and folders: done in reverse order so a folder's contents
+	# are deleted before the folder itself
+	def delete_files(self, files_to_delete: List[File]) -> None:
+		for file in reversed(files_to_delete):
+			if file.type == 'f':
+				try:
+					if not g.dry_run:
+						self.rm(file.name)
+					log.info("Deleted file:", file.name)
+				except OSError as e:
+					log.exit_except(e, "File deletion failed:", file.name)
+			elif file.type == 'd':
+				try:
+					if not g.dry_run:
+						self.rmdir(file.name)
+					log.info("Deleted folder:", file.name)
+				except OSError as e:
+					log.exit_except(e, "Folder deletion failed:", file.name)
+
+	# update DST's file timestamps based on SRC's files
+	# only when the timestamp need to be changed
+	def update_timestamps(self, files: List[Tuple[File, File]]) -> None:
+		for src, dst in files:
+			try:
+				if not g.dry_run:
+					self.touch(dst.name, src.mtime)
+				log.info("Updated timestamp:", dst.name)
+			except OSError as e:
+				log.exit_except(e, "Updating timestamp failed:", dst.name)
+
+	# create directories as necessary
+	# skip existing directories silently
+	def create_directory(self, path: str) -> None:
+		if not self.base_dir_exists or not self.isdir(path):
+			try:
+				if not g.dry_run:
+					self.mkdir(path)
+				log.info("Created directory", path)
+			except OSError as e:
+				log.exit_except(e, "mkdir failed", path)
+
+	# Attempt to move a file, creating the destination directory, if necessary.
+	# Unlike the other methods, move is designed to fail gently and returns success or failure.
+	# Moves may fail because yet-to-be-deleted files are in the way
+	def move(self, old_path: str, new_path: str) -> bool:
+		container = new_path.rpartition('/')[0]
+
+		if len(container) > 0 and not self.isdir(container):
+			try:
+				if not g.dry_run:
+					self.mkdir(container)
+				log.info("Created directory", container)
+			except OSError:
+				log.info("Failed to move file", old_path, "to", new_path)
+				return False
+
+		try:
+			if not g.dry_run:
+				self.mv(old_path, new_path)
+			log.info("Moved file", old_path, "to", new_path)
+			return True
+		except OSError:
+			log.info("Failed to move file", old_path, "to", new_path)
+			return False
+
+
+# This class creates an adb shell to send commands to and receive output.
+# It uses null chars to indicate the end of a command's output
+class AdbShell(object):
+	def __init__(self) -> None:
+		self.stream = subprocess.Popen(
+			[*g.adb_cmd, 'shell', '-T'],
+			stdout=subprocess.PIPE,
+			stdin=subprocess.PIPE,
+			stderr=subprocess.PIPE)
+
+		self.last_command_result = -1
+		self.pending = False
+		self.crlf = False
+		self.last_error = ''
+
+		# On Windows adb does lf -> crlf conversion so we have to detect it
+		# Doing it this way allows for adb on certain Windows environments
+		# which might not have lf -> crlf conversion
+		self.capture_stdout(b'echo hello')
+		response = self.__next__()
+		# On Windows the output should be b'hello\r'
+		if response[-1] == 13:
+			self.crlf = True
+		self.finish_command()
+
+	def capture_stdout(self, *cmd: bytes) -> None:
+		if self.pending:
+			log.exit("Command without finishing read")
+
+		self.stream.stdin.write(b" ".join(cmd) + b";"
+			b"echo -ne '\\x00'$?'\\x00';echo -ne '\\x00' >&2\n")
+		self.stream.stdin.flush()
+		self.pending = True
+		self.last_command_result = -1
+		self.last_error = ''
+
+	def run_command(self, *cmd: bytes) -> int:
+		if self.pending:
+			log.exit("Command without finishing read")
+
+		self.stream.stdin.write(b" ".join(cmd) + b" > /dev/null;"
+			b"echo -ne '\\x00'$?'\\x00';echo -ne '\\x00' >&2\n")
+		self.stream.stdin.flush()
+		self.pending = True
+		self.last_error = ''
+
+		return self.finish_command()
+
+	# shell quote and convert to bytes
+	@staticmethod
+	def shell_quote(arg: str) -> bytes:
+		return shlex.quote(arg).encode('utf-8', 'surrogateescape')
+
+	# read a byte at a time
+	# if an empty string is returned exit with a return code if found
+	def read(self) -> bytes:
+		if c := self.stream.stdout.read(1):
+			return c
+
+		# read has failed, so exit with message
+		log.exit("Adb error:", self.read_strerr())
+
+	# read errors from stderr, ignore utf8 errors and read to EOF if necessary
+	def read_strerr(self) -> None:
+		out = []
+		while (c := self.stream.stderr.read(1)) and c != b'\x00':
+			out.append(c)
+		return b''.join(out).decode('utf8', 'replace').rstrip()
+
+	# A readline function which stops when a newline or a null char is received.
+	# Note 1: unlike normal readline functions, newline chars are not appended to the output.
+	# This saves us the trouble of deleting them later on.
+	# Note 2: characters received between a newline and a null char are discarded.
+	def __next__(self) -> bytes:
+		if not self.pending:
+			raise StopIteration
+
+		line = []
+		while True:
+			char = self.read()
+
+			if char == b'\x00':
+				self.read_return_code()
+				raise StopIteration
+			elif char == b'\n':
+				if self.crlf:
+					line.pop()
+				return b''.join(line)
+			else:
+				line.append(char)
+
+	def __iter__(self) -> AdbShell:
+		return self
+
+	# dispose of any remaining output returns the command return code
+	def finish_command(self) -> int:
+		if not self.pending:
+			return self.last_command_result
+
+		while self.read() != b'\x00':
+			pass
+
+		return self.read_return_code()
+
+	# Read the return code which is sandwiched between two null chars.
+	# Only call this when a null char has already been read.
+	def read_return_code(self) -> int:
+		result = []
+		while (char := self.read()) and char != b'\x00':
+			result.append(char)
+
+		# set command result
+		try:
+			self.last_command_result = int(b''.join(result))
+		except ValueError:
+			log.exit("Command failed to return status")
+
+		# tidy up command
+		self.pending = False
+		self.last_error = self.read_strerr()
+
+		# return status
+		return self.last_command_result
+
+	# cleanup
+	def __del__(self) -> None:
+		self.stream.stdout.close()
+		self.stream.stdin.close()
+
+
+class AdbOS(common_utils):
+	def __init__(self, base_dir: str, is_target_folder: bool) -> None:
+		self.shell = AdbShell()
+		self.is_target_folder = is_target_folder
+
+		# Android path must be an absolute unix path
+		if len(base_dir) < 1 or base_dir[0] != '/':
+			log.exit("Device directory path must be an absolute path")
+
+		# clean up path and make sure it's stored in normal utf-8
+		base_dir = posixpath.realpath(mac2linux(base_dir))
+
+		# Attempt to create target dir. We only do this on DST, not SRC
+		super().__init__(base_dir)
+
+	# Sends a find command via adb without waiting for output
+	def prepare_walk(self, follow_symlinks: bool = False) -> None:
+		if not self.base_dir_exists:
+			return
+
+		if follow_symlinks:
+			self.shell.capture_stdout(b'find -L . -exec stat -Lc "//%f|%s|%Y|%n" {} \\+')
+		else:
+			self.shell.capture_stdout(b'find . -exec stat -c "//%f|%s|%Y|%n" {} \\+')
+
+	# Now read the output from the previous function
+	def do_walk(self, exclude: wile_card_search) -> List[File]:
+		file_list = []
+
+		if not self.base_dir_exists:
+			return file_list
+
+		for line in self.shell:
+			if line[0:2] == b'//':
+				try:
+					mode, size, mtime, filename = line[2:].split(b'|', 3)
+				except ValueError:
+					log.exit("Parsing error: corrupt stat output")
+
+				# skip the parent directory itself
+				if filename == b'.':
+					continue
+
+				if filename[0:2] != b'./' or len(filename) < 3:
+					log.exit("Parsing error: corrupt stat output")
+
+				# Get the values we're interested in.
+				try:
+					mode = int(mode, 16)  # hex value
+					size = int(size)
+					mtime = int(mtime)
+				except ValueError:
+					log.exit("Stat parsing error: corrupt output")
+
+				# strip off leading './' and convert to unicode
+				filename = filename[2:].decode('utf-8', 'surrogateescape')
+
+				# add file
+				file_list.append(File(filename, mode, mtime, size))
+			else:
+				# rare (!) filename with newline char(s)
+				try:
+					file_list[-1].name += '\n' + line.decode('utf-8', 'surrogateescape')
+				except IndexError:
+					log.exit("Stat parsing error: corrupt output")
+
+		if self.shell.finish_command() != 0:
+			log.err(self.shell.last_error)
+			log.exit("Failed to fully index Android directory")
+
+		# now filter for "ignored" files and folders
+		if exclude.active:
+			ignore_dir_contents = False
+			ignored_dir_length = None
+			for file in file_list:
+				if ignore_dir_contents:
+					try:
+						if file.name[ignored_dir_length] == '/':
+							file.ignore = True
+							continue
+					except IndexError:
+						pass
+
+					ignore_dir_contents = False
+
+				if exclude.match(file.name.rpartition('/')[2]):
+					file.ignore = True
+
+					# also mark a directory's content as ignored
+					if file.type == 'd':
+						ignored_dir_length = len(file.name)
+						ignore_dir_contents = True
+
+		return file_list
+
+	# pull a file from the device to the host pc
+	def transfer(self, filename: str, dst_base_dir: str) -> int:
+		src = self.base_dir + '/' + filename
+		dst = dst_base_dir + '/' + linux2mac(filename)
+
+		log.info("Pulling:", src)
+
+		if g.dry_run:
+			return 0
+
+		try:
+			return subprocess.call([*g.adb_cmd, 'pull', '-a', src, dst], stdout=log.adb_stdout)
+		except:  # catch all interrupts
+			return -1
+
+	# Run a command to calculate md5 checksums without waiting for the output.
+	# The -b command line option suppresses the printing of filenames to stdout
+	# thus simplifying output processing.
+	def prepare_checksums(self, device_files: List[File]) -> None:
+		self.shell.capture_stdout(
+			b'md5sum -b',
+			*[AdbShell.shell_quote(f.name) for f in device_files])
+
+	# Process the output of the previous function
+	def get_checksums(self, expected_num: int) -> List[str]:
+		device_md5 = []
+
+		for md5 in self.shell:
+			if len(md5) != 32:
+				log.exit("md5 parsing error", md5.decode('utf-8', 'replace'))
+
+			for c in md5:
+				if c < 48 or (c > 57 and c < 97) or c > 102:
+					log.exit("md5 parsing error", md5.decode('utf-8', 'replace'))
+
+			device_md5.append(md5.decode('ascii'))
+
+		# a different number of cksums means somethings gone wrong
+		if self.shell.finish_command() != 0 or expected_num != len(device_md5):
+			log.exit("Bad md5sum: " + self.shell.last_error)
+
+		return device_md5
+
+	# some self-explanatory funcs
+	def rm(self, path: str) -> None:
+		escaped_path = AdbShell.shell_quote(path)
+		if self.shell.run_command(b"rm", escaped_path) != 0:
+			raise OSError("rm failed: " + self.shell.last_error)
+
+	def rmdir(self, path: str) -> None:
+		escaped_path = AdbShell.shell_quote(path)
+		if self.shell.run_command(b"rmdir", escaped_path) != 0:
+			raise OSError("rmdir failed: " + self.shell.last_error)
+
+	def isdir(self, path: str) -> bool:
+		escaped_path = AdbShell.shell_quote(path)
+		return self.shell.run_command(b'test -d', escaped_path) == 0
+
+	def mkdir(self, path: str) -> None:
+		escaped_path = AdbShell.shell_quote(path)
+		if self.shell.run_command(b'mkdir -p', escaped_path) != 0:
+			raise OSError("mkdir failed: " + self.shell.last_error)
+
+	def mv(self, old_path: str, new_path: str) -> bool:
+		old_path = AdbShell.shell_quote(old_path)
+		new_path = AdbShell.shell_quote(new_path)
+		if self.shell.run_command(b'mv', old_path, new_path) != 0:
+			raise OSError("mv failed: " + self.shell.last_error)
+
+	def touch(self, path: str, time: int) -> None:
+		escaped_path = AdbShell.shell_quote(path)
+		timestamp = datetime.datetime.utcfromtimestamp(time).isoformat().encode('ascii') + b'Z'
+		if self.shell.run_command(b'touch -cd', timestamp, escaped_path) != 0:
+			raise OSError("touch failed: " + self.shell.last_error)
+
+	def cd(self, path: str) -> None:
+		escaped_path = AdbShell.shell_quote(path)
+		if self.shell.run_command(b'cd', escaped_path) != 0:
+			raise OSError("cd failed: " + self.shell.last_error)
+
+
+class LocalOS(common_utils):
+	def __init__(self, base_dir: str, is_target_folder: bool) -> None:
+		self.is_target_folder = is_target_folder
+
+		# get canonical path (absolute and cleaned)
+		# On MacOS: ensure path is saved in mac utf-8
+		base_dir = linux2mac(os.path.realpath(base_dir))
+
+		# Use forward slashes for consistency
+		if os.name == 'nt':
+			base_dir.replace('\\', '/')
+
+		# attempt to create base dir. We only do this on DST, not SRC
+		super().__init__(base_dir)
+
+	# This method always returns normalised utf-8
+	def walk_files(self, follow_symlinks: bool, exclude: wile_card_search) -> List[File]:
+		file_list = []
+
+		if not self.base_dir_exists:
+			return file_list
+
+		def crawl(directory, prefix: str = '', ignore: bool = False) -> None:
+			for e in os.scandir(directory):
+				name = mac2linux(e.name)
+				st = e.stat(follow_symlinks=follow_symlinks)
+
+				ignore_file = ignore or exclude.match(name)
+
+				# add entry for this file/folder
+				file_list.append(File(
+					prefix + name,
+					st.st_mode,
+					int(st.st_mtime),
+					st.st_size,
+					ignore_file))
+
+				# recurse
+				if stat.S_ISDIR(st.st_mode):
+					crawl(e.path, prefix + name + '/', ignore_file)
+
+		try:
+			crawl('.')
+		except OSError as e:
+			log.exit_except(e, "Failed to index local directory")
+
+		return file_list
+
+	def transfer(self, filename: str, dst_base_dir: str) -> int:
+		src = self.base_dir + '/' + linux2mac(filename)
+		dst = dst_base_dir + '/' + filename
+
+		log.info("Pushing: ", src)
+
+		if g.dry_run:
+			return 0
+
+		try:
+			return subprocess.call([*g.adb_cmd, 'push', src, dst], stdout=log.adb_stdout)
+		except:  # catch all interrupts
+			return -1
+
+	def get_checksum(self, file: str) -> str:
+		md5 = hashlib.md5()
+		with open(linux2mac(file), "rb") as f:
+			while block := f.read(io.DEFAULT_BUFFER_SIZE):
+				md5.update(block)
+		return md5.hexdigest()
+
+	# the progress tracker assumes computing the host and device checksums will
+	# take the same time
+	def get_checksums(self, local_files: List[File]) -> List[str]:
+		local_md5 = []
+
+		try:
+			start = time.time()
+			total_size = 0
+			for file in local_files:
+				total_size += file.size
+
+			total_done = time_taken = 0
+			for file in local_files:
+				local_md5.append(self.get_checksum(file.name))
+				total_done += file.size
+
+				completed = total_done / total_size
+				time_taken = time.time() - start
+				eta = (time_taken / completed) - time_taken
+
+				log.info(f"\rProgress: {completed:6.1%} (eta {eta:.1f} seconds)	", end='')
+			log.info(f"\rCompleted checksums in {time_taken:.1f} seconds			   ")
+
+		except KeyboardInterrupt:
+			log.info()
+			raise
+
+		# a different number of cksums means something has gone wrong
+		if len(local_files) != len(local_md5):
+			log.exit("Bad md5sum")
+
+		return local_md5
+
+	# some self-explanatory utils
+	def rm(self, path: str) -> None:
+		path = linux2mac(path)
+		os.remove(path)
+
+	def rmdir(self, path: str) -> None:
+		path = linux2mac(path)
+		os.rmdir(path)
+
+	def isdir(self, path: str) -> bool:
+		path = linux2mac(path)
+		return os.path.isdir(path)
+
+	def mkdir(self, path: str) -> None:
+		path = linux2mac(path)
+		os.makedirs(path, exist_ok=True)
+
+	def mv(self, old_path: str, new_path: str) -> bool:
+		old_path = linux2mac(old_path)
+		new_path = linux2mac(new_path)
+		os.rename(old_path, new_path)
+
+	def touch(self, path: str, time: int) -> None:
+		path = linux2mac(path)
+		os.utime(path, times=(time, time))
+
+	def cd(self, path: str) -> None:
+		path = linux2mac(path)
+		os.chdir(path)
+
+
+def diff_file_lists(src: List[File], dst: List[File], clobber: bool
+		) -> Tuple[List[File], List[Tuple[File, File]], List[File]]:
+	s = d = 0
+
+	src.sort(key=File.sort_by_name)
+	dst.sort(key=File.sort_by_name)
+
+	to_transfer = []
+	both = []
+	to_delete = []
+
+	while s < len(src) and d < len(dst):
+		if src[s].name == dst[d].name:
+			if src[s].ignore or dst[d].ignore:
+				log.debug("Ignoring:", src[s].name)
+			elif src[s].type == 'f' and dst[d].type == 'f':
+				both.append((src[s], dst[d]))
+			elif src[s].type == 'd' and dst[d].type == 'd':
+				pass
+			elif clobber:
+				log.debug("Clobbering:", src[s].name)
+				to_transfer.append(src[s])
+				to_delete.append(dst[d])
+			else:
+				log.info("File/Folder inconsistency:", src[s].name)
+			s += 1
+			d += 1
+		elif src[s].name < dst[d].name:
+			# local file/folder without corresponding item on device
+			# send files and create empty dirs
+			# ignore full dirs
+			to_transfer.append(src[s])
+			s += 1
+		else:
+			# file/folder on device without corresponding item on local computer
+			# mark for deletion
+			to_delete.append(dst[d])
+			d += 1
+
+	while s < len(src):
+		# local file/folder without corresponding item on device
+		# send files and create empty dirs
+		# ignore full dirs
+		to_transfer.append(src[s])
+		s += 1
+
+	while d < len(dst):
+		# file/folder on device without corresponding item on local computer
+		# mark for deletion
+		to_delete.append(dst[d])
+		d += 1
+
+	return to_transfer, both, to_delete
+
+
+# Examines lists of :
+# 1. files to be uploaded to DST, and
+# 2. files to be deleted on DST.
+# And compares them if see if any of them might be the same file which has been moved.
+def find_potential_moved_pairs(src_list: List[File], dst_list: List[File]
+		) -> Tuple[List[File], List[File]]:
+	src_to_check = []
+	dst_to_check = []
+
+	src = sorted(src_list, key=File.sort_by_size_and_time)
+	dst = sorted(dst_list, key=File.sort_by_size_and_time)
+
+	s = d = 0
+	# skip dirs, empty and ignored files
+	while s < len(src) and (src[s].type != 'f' or src[s].size == 0 or src[s].ignore):
+		s += 1
+
+	while d < len(dst) and (dst[d].type != 'f' or dst[d].size == 0 or dst[d].ignore):
+		d += 1
+
+	while s < len(src) and d < len(dst):
+		if src[s].size < dst[d].size:
+			s += 1
+		elif src[s].size > dst[d].size:
+			d += 1
+		elif src[s].mtime < dst[d].mtime:
+			s += 1
+		elif src[s].mtime > dst[d].mtime:
+			d += 1
+		# files are the same date and size
+		else:
+			src_to_check.append(src[s])
+			dst_to_check.append(dst[d])
+			s += 1
+			d += 1
+
+	return src_to_check, dst_to_check
+
+
+def transfer_files(src_os, dst_os, files: List[File]) -> None:
+	for file in files:
+		if file.ignore:
+			log.debug("Ignoring:", file.name)
+		else:
+			if file.type == 'f':
+				rv = src_os.transfer(file.name, dst_os.base_dir)
+
+				if rv != 0:
+					log.exit("File transfer error: ", file.name)
+			elif file.type == 'd':
+				dst_os.create_directory(file.name)
+
+
+# 1. The prepare_checksums method send one long command to the device.
+# 2. We then run get_checksums on the local pc. This method also prints progress info.
+# 3. We then collect checksums obtained from the device which was working in parallel with 2.
+def run_checksum(src_os, dst_os, src_to_check: List[File], dst_to_check: List[File]
+		) -> Tuple[List[str], List[str]]:
+	if hasattr(dst_os, 'prepare_checksums'):
+		dst_os.prepare_checksums(dst_to_check)
+		src_md5 = src_os.get_checksums(src_to_check)
+		dst_md5 = dst_os.get_checksums(len(dst_to_check))
+	else:
+		src_os.prepare_checksums(src_to_check)
+		dst_md5 = dst_os.get_checksums(dst_to_check)
+		src_md5 = src_os.get_checksums(len(src_to_check))
+	return src_md5, dst_md5
+
+
+# Much like the above: device command is run first, then local files are indexed, then device
+# file info is collected
+def run_walk(src_os, dst_os, follow_symlinks: bool, exclude: wile_card_search
+		) -> Tuple[List[File], List[File]]:
+	if hasattr(dst_os, 'prepare_walk'):
+		dst_os.prepare_walk(False)
+		src_md5 = src_os.walk_files(follow_symlinks, exclude)
+		dst_md5 = dst_os.do_walk(exclude)
+	else:
+		src_os.prepare_walk(follow_symlinks)
+		dst_md5 = dst_os.walk_files(False, exclude)
+		src_md5 = src_os.do_walk(exclude)
+	return src_md5, dst_md5
+
+
+def run_adb_sync() -> None:
+	parser = argparse.ArgumentParser(
+		description='Sync a directory between an Android device and the local file system.',
+		usage="abd-sync [options] SRC DST",
+		epilog="File syncing is inherently dangerous. It's ralatively easy to accidently "
+		"delete lots of files in a fraction of second by typing the wrong command! I strongly "
+		"recommend testing commands using --dry-run before actually running them. You have "
+		"been warned!",
+		add_help=False)
+
+	# main folder args
+	dirs = parser.add_argument_group(
+		title='Directories',
+		description='Android file path must be absolute paths. If copying from Android to PC, '
+		'specify the -r option.')
+
+	dirs.add_argument(
+		'source',
+		metavar='SRC',
+		type=str,
+		help='The source directory to copy from.')
+	dirs.add_argument(
+		'destination',
+		metavar='DST',
+		type=str,
+		help='The directory to copy to.')
+	dirs.add_argument(
+		'-r',
+		'--reverse',
+		action='store_true',
+		help='Sync from Adroid to be a local folder.')
+
+	# async args
+	algorithm = parser.add_argument_group(
+		title="File Comparison Algorithms",
+		description="The file comparison to use. With the exception of --two-way, file which are "
+		"on SRC but not on DST are always copied from SRC to DST. By default only files which are "
+		"newer on SRC than on DST are copied from SRC to DST."
+	).add_mutually_exclusive_group()
+	algorithm.add_argument(
+		'-f',
+		'--filesize',
+		action='store_true',
+		help='Files with different sizes are copied from SRC to DST. File save times are ignored.')
+	algorithm.add_argument(
+		'-c',
+		'--checksum',
+		action='store_true',
+		help="Files with different sizes are copied from SRC to DST. As are files with different "
+		"md5 checksums. File timestampts on DST are also corrected to be the same as those on "
+		"SRC. Checking checksum can take some time. This option's main use is to recover from an "
+		"interruped sync operation which may have left incomplete files behind.")
+	algorithm.add_argument(
+		'-2',
+		'--two-way',
+		action='store_true',
+		help='The newer of the files stored on SRC or DST is copied to the other. Files not on '
+		'SRC are copied from DST and files not on DST are copied from SRC. This can result in '
+		'files being undeleted.')
+
+	options = parser.add_argument_group(title="Options")
+	options.add_argument(
+		'-d',
+		'--delete',
+		action='store_true',
+		help='Delete files from DST that are not present on SRC. This also deletes files to make '
+		'way for and directories and vice-versa.')
+	options.add_argument(
+		'-m',
+		'--sniff-moves',
+		action='store_true',
+		help='Search for moved and renamed files. These can be moved on DST instead of being '
+		'deleted and pushed. Uses md5 checksums.')
+	options.add_argument(
+		'--follow-symlinks',
+		action='store_true',
+		default=False,
+		help='Follow symbolic links when indexing SRC. No attempt is made to recreate links on '
+		'DST, so a link to a directory on SRC will be created as a directory on DST, and links to '
+		'to files will be copies as files. Adb-sync will quit if any symlinks are found on DST, '
+		'or, when not following symlinks, are found on SRC. (Default: False)')
+	options.add_argument(
+		'--exclude',
+		action='append',
+		default=[],
+		help='Exclude files and directories. Wildcard match against filenames not paths. Can be '
+		'specified multiple times. Excluded files are not transferred to DST but may be deleted '
+		'from DST with the --delete option.')
+	options.add_argument(
+		'-a',
+		'--adb',
+		type=str,
+		metavar='CMD',
+		help='the adb instance to use (e.g. -a "/path/to/adb" or -a "adb -P 1234")')
+	options.add_argument(
+		'-n',
+		'--dry-run',
+		action='store_true',
+		help='Do not do anything, just show what would be done.')
+	options.add_argument(
+		'-h',
+		'--help',
+		action='help',
+		help='Show this help message and exit.')
+	logging = options.add_mutually_exclusive_group()
+	logging.add_argument(
+		'-q',
+		'--quiet',
+		action='store_true',
+		help='Hide warning and progress messages.')
+	logging.add_argument(
+		'-v',
+		'--verbose',
+		action='store_true',
+		help='Print some extra messages.')
+	args = parser.parse_args()
+
+	# logging
+	if args.quiet:
+		log.set_level(log.QUIET)
+	elif args.verbose:
+		log.set_level(log.DEBUG)
+	else:
+		log.set_level(log.NORMAL)
+
+	# deal with conflicting arguments
+	if args.two_way:
+		if args.delete:
+			log.exit("--delete is incompatible with --two_way")
+		elif args.sniff_moves:
+			log.exit("--sniff-moves is incompatible with --two_way")
+		elif args.follow_symlinks:
+			log.exit("--follow-symlinks is incompatible with --two_way")
+
+	# set global vars
+	if args.adb is not None:
+		g.adb_cmd = shlex.split(args.adb)
+	if args.dry_run:
+		log.info("Dry run mode")
+		g.dry_run = True
+
+	# src + dst
+	if args.reverse:
+		src_os = AdbOS(args.source, False)
+		dst_os = LocalOS(args.destination, True)
+	else:
+		src_os = LocalOS(args.source, False)
+		dst_os = AdbOS(args.destination, True)
+
+	# wild card
+	exclude = wile_card_search(args.exclude)
+
+	log.info("Indexing files")
+	src_files, dst_files = run_walk(src_os, dst_os, args.follow_symlinks, exclude)
+
+	# following symlinks would overcomplicate two-way sync
+	if args.two_way:
+		for file in src_files:
+			if file.type == 'l':
+				log.exit("Symbolic link found in SRC:", file.name)
+
+	# if we are following symbolic links there shouldn't be any there
+	elif not args.follow_symlinks:
+		for file in src_files:
+			if file.type == 'l':
+				log.info("Warning: not following symbolic link:", file.name)
+				file.ignore = True
+
+	# carp if we find a symbolic link in DST
+	for file in dst_files:
+		if file.type == 'l':
+			log.exit("Symbolic link found in DST:", file.name)
+
+	log.info("Comparing file lists")
+	to_push, file_pairs_to_check, to_delete = diff_file_lists(src_files, dst_files, args.delete)
+	del src_files
+	del dst_files
+
+	# the algorithms
+	if args.two_way:
+		src_to_dst = to_push
+		dst_to_src = to_delete
+
+		for src, dst in file_pairs_to_check:
+			if src.mtime > dst.mtime:
+				src_to_dst.append(src)
+			elif src.mtime < dst.mtime:
+				dst_to_src.append(dst)
+			elif src.size != dst.size:
+				log.info("Warning", src.name, "has the same modified time but varies in size")
+
+		if len(src_to_dst) == 0 and len(dst_to_src) == 0:
+			log.info("Not copying any files")
+		else:
+			if len(src_to_dst) > 0:
+				log.info("Updating files from SRC to DST")
+				transfer_files(src_os, dst_os, src_to_dst)
+
+			if len(dst_to_src) > 0:
+				log.info("Updating files from DST to SRC")
+				transfer_files(dst_os, src_os, dst_to_src)
+
+		# two way sync is now finished so return here
+		return
+
+	# check for moved files
+	if args.sniff_moves:
+		if len(to_push) == 0 or len(to_delete) == 0:
+			log.info("No file moves to check")
+		else:
+			src_to_check, dst_to_check = find_potential_moved_pairs(to_push, to_delete)
+
+			if len(src_to_check) == 0:
+				log.info("Not checking any file moves")
+			else:
+				log.info("Doing checksum for file move check")
+				src_md5, dst_md5 = run_checksum(src_os, dst_os, src_to_check, dst_to_check)
+
+				for i in range(len(src_md5)):
+					if src_md5[i] == dst_md5[i]:
+						if dst_os.move(dst_to_check[i].name, src_to_check[i].name):
+							to_push.remove(src_to_check[i])
+							to_delete.remove(dst_to_check[i])
+
+	# the other algorithms
+	check_timestamps = []
+	if args.checksum:
+		# only run checksum when the sizes of files are different
+		src_to_check = []
+		dst_to_check = []
+		for src, dst in file_pairs_to_check:
+			if src.size == dst.size:
+				src_to_check.append(src)
+				dst_to_check.append(dst)
+			else:
+				to_push.append(src)
+
+		if len(src_to_check) == 0:
+			log.info("No checksums to check")
+		else:
+			log.info("Running checksums")
+			src_md5, dst_md5 = run_checksum(src_os, dst_os, src_to_check, dst_to_check)
+
+			# compare the two sets of cksums and add files with different cksums to the
+			# to-be-transfered list
+			for i in range(len(src_to_check)):
+				if src_md5[i] != dst_md5[i]:
+					log.debug("Debug: diff checksum", src_to_check[i].name)
+					to_push.append(src_to_check[i])
+				elif src_to_check[i].mtime != dst_to_check[i].mtime:
+					check_timestamps.append((src_to_check[i], dst_to_check[i]))
+
+	# copy any files with size differences
+	elif args.filesize:
+		for src, dst in file_pairs_to_check:
+			if src.size != dst.size:
+				to_push.append(src)
+
+	# default to only transferring a file based on age
+	else:
+		for src, dst in file_pairs_to_check:
+			if src.mtime > dst.mtime:
+				to_push.append(src)
+			elif src.mtime < dst.mtime:
+				log.info(src.name, "is newer on DST than version on SRC", src.mtime, dst.mtime)
+			elif src.size != dst.size:
+				log.info(src.name, "has the same modified time but file size varies")
+
+	# delete file on DST which were not found on SRC
+	if args.delete:
+		if len(to_delete) == 0:
+			log.info("Not deleting any files")
+		else:
+			log.info("Deleting files...")
+			dst_os.delete_files(to_delete)
+
+	# Push/pull files
+	if len(to_push) == 0:
+		log.info("Not copying any files")
+	else:
+		log.info("Copying files from SRC to DST")
+		transfer_files(src_os, dst_os, to_push)
+
+	# update time stamps on unchanged files
+	if args.checksum:
+		if len(check_timestamps) == 0:
+			log.info("No timestamps to update")
+		else:
+			log.info("Updating timestamps on DST")
+			dst_os.update_timestamps(check_timestamps)
+
+
+def main() -> None:
+	try:
+		script_start_time = time.time()
+		run_adb_sync()
+		log.info("Completed in {:.1f} seconds".format(time.time() - script_start_time))
+		exit(0)
+	except KeyboardInterrupt:
+		# Catch Ctrl-C, and quit without a traceback
+		exit(1)
+
+
+if __name__ == '__main__':
+	main()
