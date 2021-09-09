@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 from typing import List, Tuple
-
 import argparse
 import datetime
 import hashlib
@@ -30,9 +29,14 @@ import posixpath
 import sys
 import re
 
+# Min python version
+if sys.version_info < (3, 8):
+    print("Python 3.8 or higher is required.")
+    exit(1)
+
 # This prevents errors when printing malformed utf8 filenames to stdout
 if sys.stdout.encoding == 'UTF-8':
-	sys.stdout.reconfigure(error='replace')
+	sys.stdout.reconfigure(errors='replace')
 
 # Functions to handle unicode normalisation on MacOS
 # Mac uses a subset of unicode in filenames
@@ -58,30 +62,33 @@ class log(object):
 	QUIET = 2
 	NORMAL = 3
 
-	adb_stdout = None
-	level = NORMAL
-
 	@staticmethod
 	def ignore(*argv, **kwargs) -> None:
 		pass
 
 	@staticmethod
+	def err(*argv, **kwargs) -> None:
+		print(*argv, **kwargs, file=sys.stderr)
+
+	@staticmethod
 	def exit(*argv, **kwargs) -> None:
-		print(*argv, **kwargs)
-		print("Aborting sync...")
+		print(*argv, **kwargs, file=sys.stderr)
+		print("Aborting sync...", file=sys.stderr)
 		exit(1)
 
 	@staticmethod
-	def log_except(ex: Exception, *argv, **kwargs) -> None:
+	def exit_except(ex: Exception, *argv, **kwargs) -> None:
 		if log.level == log.DEBUG:
-			print(*argv, **kwargs)
-			print("Aborting sync...")
+			print(*argv, **kwargs, file=sys.stderr)
+			print("Aborting sync...", file=sys.stderr)
 			raise ex
 		else:
 			s = str(ex)
 			if len(s) > 0:
-				print(s)
-			log.exit(*argv, **kwargs)
+				print(*argv, s, **kwargs, file=sys.stderr)
+			else:
+				print(*argv, **kwargs, file=sys.stderr)
+			exit(1)
 
 	@staticmethod
 	def set_level(level: int) -> None:
@@ -89,23 +96,21 @@ class log(object):
 		if level == log.DEBUG:
 			log.info = print
 			log.debug = print
-			log.err = print
 			log.adb_stdout = None
 		elif level == log.QUIET:
 			log.info = log.ignore
 			log.debug = log.ignore
-			log.err = print
 			log.adb_stdout = subprocess.DEVNULL
 		else:
 			log.info = print
 			log.debug = log.ignore
-			log.err = print
 			log.adb_stdout = None
 
 	# defaults
 	info = print
 	debug = ignore
-	err = print
+	adb_stdout = None
+	level = NORMAL
 
 
 # some global vars
