@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 -b
+#!/usr/bin/env python3
 
 # Copyright 2021 Michael J. Walsh
 #
@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
 from typing import List, Tuple
 import argparse
 import datetime
@@ -29,14 +28,10 @@ import posixpath
 import sys
 import re
 
-# Min python version
-if sys.version_info < (3, 8):
-    print("Python 3.8 or higher is required.")
-    exit(1)
-
 # This prevents errors when printing malformed utf8 filenames to stdout
 if sys.stdout.encoding == 'UTF-8':
-	sys.stdout.reconfigure(errors='replace')
+	sys.stdout = io.TextIOWrapper(sys.stdout.buffer, errors="surrogateescape", line_buffering=True)
+	sys.stderr = io.TextIOWrapper(sys.stderr.buffer, errors="surrogateescape", line_buffering=True)
 
 # Functions to handle unicode normalisation on MacOS
 # Mac uses a subset of unicode in filenames
@@ -142,18 +137,18 @@ class File(object):
 		# Size in bytes
 		self.size = size
 
-	def __eq__(self, other: File) -> bool:
+	def __eq__(self, other) -> bool:
 		return self.name == other.name
 
 	def __hash__(self) -> int:
 		return hash(self.name)
 
 	@staticmethod
-	def sort_by_name(o: File) -> str:
+	def sort_by_name(o) -> str:
 		return o.name
 
 	@staticmethod
-	def sort_by_size_and_time(o: File) -> Tuple[int, int]:
+	def sort_by_size_and_time(o) -> Tuple[int, int]:
 		if o.ignore or o.type != 'f':
 			return 0, 0
 		else:
@@ -165,13 +160,10 @@ class File(object):
 class wile_card_search(object):
 	def __init__(self, patterns) -> None:
 		self.patterns = [self.wild2re(pattern) for pattern in patterns]
-		if len(self.patterns) > 0:
-			self.active = True
-		else:
-			self.active = False
+		self.active = len(self.patterns) > 0
 
 	@staticmethod
-	def wild2re(pattern: str) -> re.Pattern:
+	def wild2re(pattern: str):
 		out = []
 		for part in pattern.split(r'\*'):
 			subout = []
@@ -341,12 +333,13 @@ class AdbShell(object):
 	# shell quote and convert to bytes
 	@staticmethod
 	def shell_quote(arg: str) -> bytes:
-		return shlex.quote(arg).encode('utf-8', 'surrogateescape')
+		return shlex.quote(arg).encode('UTF-8', 'surrogateescape')
 
 	# read a byte at a time
 	# if an empty string is returned exit with a return code if found
 	def read(self) -> bytes:
-		if c := self.stream.stdout.read(1):
+		c = self.stream.stdout.read(1)
+		if c:
 			return c
 
 		# read has failed, so exit with message
@@ -355,9 +348,12 @@ class AdbShell(object):
 	# read errors from stderr, ignore utf8 errors and read to EOF if necessary
 	def read_strerr(self) -> None:
 		out = []
-		while (c := self.stream.stderr.read(1)) and c != b'\x00':
+		c = self.stream.stderr.read(1)
+		while c != b'\x00' and c != b'':
 			out.append(c)
-		return b''.join(out).decode('utf8', 'replace').rstrip()
+			c = self.stream.stderr.read(1)
+
+		return b''.join(out).decode('UTF-8', 'replace').rstrip()
 
 	# A readline function which stops when a newline or a null char is received.
 	# Note 1: unlike normal readline functions, newline chars are not appended to the output.
@@ -381,7 +377,7 @@ class AdbShell(object):
 			else:
 				line.append(char)
 
-	def __iter__(self) -> AdbShell:
+	def __iter__(self):
 		return self
 
 	# dispose of any remaining output returns the command return code
@@ -398,8 +394,10 @@ class AdbShell(object):
 	# Only call this when a null char has already been read.
 	def read_return_code(self) -> int:
 		result = []
-		while (char := self.read()) and char != b'\x00':
+		char = self.read()
+		while char != b'\x00':
 			result.append(char)
+			char = self.read()
 
 		# set command result
 		try:
@@ -475,14 +473,14 @@ class AdbOS(common_utils):
 					log.exit("Stat parsing error: corrupt output")
 
 				# strip off leading './' and convert to unicode
-				filename = filename[2:].decode('utf-8', 'surrogateescape')
+				filename = filename[2:].decode('UTF-8', 'surrogateescape')
 
 				# add file
 				file_list.append(File(filename, mode, mtime, size))
 			else:
 				# rare (!) filename with newline char(s)
 				try:
-					file_list[-1].name += '\n' + line.decode('utf-8', 'surrogateescape')
+					file_list[-1].name += '\n' + line.decode('UTF-8', 'surrogateescape')
 				except IndexError:
 					log.exit("Stat parsing error: corrupt output")
 
@@ -544,11 +542,11 @@ class AdbOS(common_utils):
 
 		for md5 in self.shell:
 			if len(md5) != 32:
-				log.exit("md5 parsing error", md5.decode('utf-8', 'replace'))
+				log.exit("md5 parsing error", md5.decode('UTF-8', 'replace'))
 
 			for c in md5:
 				if c < 48 or (c > 57 and c < 97) or c > 102:
-					log.exit("md5 parsing error", md5.decode('utf-8', 'replace'))
+					log.exit("md5 parsing error", md5.decode('UTF-8', 'replace'))
 
 			device_md5.append(md5.decode('ascii'))
 
@@ -661,7 +659,10 @@ class LocalOS(common_utils):
 	def get_checksum(self, file: str) -> str:
 		md5 = hashlib.md5()
 		with open(linux2mac(file), "rb") as f:
-			while block := f.read(io.DEFAULT_BUFFER_SIZE):
+			while True:
+				block = f.read(io.DEFAULT_BUFFER_SIZE)
+				if not block:
+					break
 				md5.update(block)
 		return md5.hexdigest()
 
@@ -685,8 +686,10 @@ class LocalOS(common_utils):
 				time_taken = time.time() - start
 				eta = (time_taken / completed) - time_taken
 
-				log.info(f"\rProgress: {completed:6.1%} (eta {eta:.1f} seconds)	", end='')
-			log.info(f"\rCompleted checksums in {time_taken:.1f} seconds			   ")
+				log.info("\rProgress: {:6.1%} (eta {:.1f} seconds)"
+					"    ".format(completed, eta), end='')
+			log.info("\rCompleted checksums in {:.1f} seconds"
+				"               ".format(time_taken))
 
 		except KeyboardInterrupt:
 			log.info()
@@ -1106,9 +1109,9 @@ def run_adb_sync() -> None:
 				to_push.append(src)
 
 		if len(src_to_check) == 0:
-			log.info("No checksums to check")
+			log.info("No need to do checksum to check file changes")
 		else:
-			log.info("Running checksums")
+			log.info("Doing checksum to check file changes")
 			src_md5, dst_md5 = run_checksum(src_os, dst_os, src_to_check, dst_to_check)
 
 			# compare the two sets of cksums and add files with different cksums to the
