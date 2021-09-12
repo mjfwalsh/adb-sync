@@ -656,44 +656,46 @@ class LocalOS(common_utils):
 		except:  # catch all interrupts
 			return -1
 
-	def get_checksum(self, file: str) -> str:
-		md5 = hashlib.md5()
-		with open(linux2mac(file), "rb") as f:
-			while True:
-				block = f.read(io.DEFAULT_BUFFER_SIZE)
-				if not block:
-					break
-				md5.update(block)
-		return md5.hexdigest()
-
 	# the progress tracker assumes computing the host and device checksums will
 	# take the same time
 	def get_checksums(self, local_files: List[File]) -> List[str]:
 		local_md5 = []
 
-		try:
-			start = time.time()
-			total_size = 0
-			for file in local_files:
-				total_size += file.size
+		start = time.time()
+		total_size = 0
+		for file in local_files:
+			total_size += file.size
 
-			total_done = time_taken = 0
-			for file in local_files:
-				local_md5.append(self.get_checksum(file.name))
-				total_done += file.size
+		total_done = time_taken = i = 0
+		tick = (1024 ** 2) // io.DEFAULT_BUFFER_SIZE
+		for file in local_files:
+			md5 = hashlib.md5()
+			f = open(linux2mac(file.name), "rb")
+			while True:
+				# process block
+				block = f.read(io.DEFAULT_BUFFER_SIZE)
+				if not block:
+					break
+				md5.update(block)
+				total_done += len(block)
+
+				# progress counter
+				i += 1
+				if i < tick:
+					continue
 
 				completed = total_done / total_size
 				time_taken = time.time() - start
 				eta = (time_taken / completed) - time_taken
-
 				log.info("\rProgress: {:6.1%} (eta {:.1f} seconds)"
-					"    ".format(completed, eta), end='')
-			log.info("\rCompleted checksums in {:.1f} seconds"
-				"               ".format(time_taken))
+					"".format(completed, eta), end='')
+				i = 0
 
-		except KeyboardInterrupt:
-			log.info()
-			raise
+			local_md5.append(md5.hexdigest())
+			f.close()
+
+		time_taken = time.time() - start
+		log.info("\rCompleted checksums in {:.1f} seconds            ".format(time_taken))
 
 		# a different number of cksums means something has gone wrong
 		if len(local_files) != len(local_md5):
