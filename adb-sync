@@ -73,17 +73,12 @@ class log(object):
 
 	@staticmethod
 	def exit_except(ex: Exception, *argv, **kwargs) -> None:
-		if log.level == log.DEBUG:
-			print(*argv, **kwargs, file=sys.stderr)
-			print("Aborting sync...", file=sys.stderr)
-			raise ex
+		s = str(ex)
+		if len(s) > 0:
+			print(*argv, s, **kwargs, file=sys.stderr)
 		else:
-			s = str(ex)
-			if len(s) > 0:
-				print(*argv, s, **kwargs, file=sys.stderr)
-			else:
-				print(*argv, **kwargs, file=sys.stderr)
-			exit(1)
+			print(*argv, **kwargs, file=sys.stderr)
+		exit(1)
 
 	@staticmethod
 	def set_level(level: int) -> None:
