@@ -158,23 +158,33 @@ class File(object):
 # converts wildcard search to regular expressions and then
 # stores the compiled REs for subsequent use
 class wile_card_search(object):
-	def __init__(self, patterns) -> None:
-		self.patterns = [self.wild2re(pattern) for pattern in patterns]
-		self.active = len(self.patterns) > 0
+	def __init__(self, filename_patterns, path_patterns) -> None:
+		self.filename_patterns = []
+		for fn_pat in filename_patterns:
+			self.filename_patterns.append(self.wild2re(r'^', fn_pat, r'$'))
+
+		self.path_patterns = []
+		for p_pat in path_patterns:
+			self.path_patterns.append(self.wild2re(r'^', p_pat, r'(/|$)'))
+
+		self.active = len(self.filename_patterns) + len(self.path_patterns) > 0
 
 	@staticmethod
-	def wild2re(pattern: str):
+	def wild2re(prefix: str, pattern: str, suffix: str):
 		out = []
 		for part in pattern.split(r'\*'):
 			subout = []
 			for subpart in part.split(r'*'):
 				subout.append(re.escape(subpart))
 			out.append(r'[^/]*'.join(subout))
-		return re.compile(r'^' + r'\*'.join(out) + r'$')
+		return re.compile(prefix + r'\*'.join(out) + suffix)
 
-	def match(self, search_string) -> bool:
-		for pattern in self.patterns:
-			if pattern.search(search_string):
+	def match(self, fullpath, filename) -> bool:
+		for pattern in self.filename_patterns:
+			if pattern.search(filename):
+				return True
+		for pattern in self.path_patterns:
+			if pattern.search(fullpath):
 				return True
 		return False
 
@@ -503,7 +513,7 @@ class AdbOS(common_utils):
 
 					ignore_dir_contents = False
 
-				if exclude.match(file.name.rpartition('/')[2]):
+				if exclude.match(file.name, file.name.rpartition('/')[2]):
 					file.ignore = True
 
 					# also mark a directory's content as ignored
@@ -621,7 +631,7 @@ class LocalOS(common_utils):
 				name = mac2linux(e.name)
 				st = e.stat(follow_symlinks=follow_symlinks)
 
-				ignore_file = ignore or exclude.match(name)
+				ignore_file = ignore or exclude.match(prefix + name, name)
 
 				# add entry for this file/folder
 				file_list.append(File(
@@ -903,7 +913,7 @@ def run_adb_sync() -> None:
 		'-r',
 		'--reverse',
 		action='store_true',
-		help='Sync from Adroid to be a local folder.')
+		help='Sync from Android to be a local folder.')
 
 	# async args
 	algorithm = parser.add_argument_group(
@@ -961,6 +971,12 @@ def run_adb_sync() -> None:
 		help='Exclude files and directories. Wildcard match against filenames not paths. Can be '
 		'specified multiple times. Excluded files are not transferred to DST but may be deleted '
 		'from DST with the --delete option.')
+	options.add_argument(
+		'--exclude-path',
+		action='append',
+		default=[],
+		help='Like --exclude but wildcards are matched against the begining of the (relative) file '
+		'path instead of the filename.')
 	options.add_argument(
 		'-a',
 		'--adb',
@@ -1023,7 +1039,7 @@ def run_adb_sync() -> None:
 		dst_os = AdbOS(args.destination, True)
 
 	# wild card
-	exclude = wile_card_search(args.exclude)
+	exclude = wile_card_search(args.exclude, args.exclude_path)
 
 	log.info("Indexing files")
 	src_files, dst_files = run_walk(src_os, dst_os, args.follow_symlinks, exclude)
