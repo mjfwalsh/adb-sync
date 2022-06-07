@@ -27,6 +27,7 @@ import time
 import posixpath
 import sys
 import re
+import fnmatch
 
 # This prevents errors when printing malformed utf8 filenames to stdout
 if sys.stdout.encoding == 'UTF-8':
@@ -152,34 +153,33 @@ class File(object):
 
 # converts wildcard search to regular expressions and then
 # stores the compiled REs for subsequent use
-class wile_card_search(object):
+class wild_card_search(object):
 	def __init__(self, filename_patterns, path_patterns) -> None:
 		self.filename_patterns = []
-		for fn_pat in filename_patterns:
-			self.filename_patterns.append(self.wild2re(r'^', fn_pat, r'$'))
-
 		self.path_patterns = []
+		self.wildcards = []
+
+		for fn_pat in filename_patterns:
+			self.filename_patterns.append(re.compile(fnmatch.translate(fn_pat)))
+
+			# hack to avoid a match for hidden files matching the root '.' dir
+			if fn_pat == ".*":
+				fn_pat = ".?*"
+
+			self.wildcards.append(b"-name " + AdbShell.shell_quote(fn_pat))
+
 		for p_pat in path_patterns:
-			self.path_patterns.append(self.wild2re(r'^', p_pat, r'(/|$)'))
+			self.path_patterns.append(re.compile(fnmatch.translate(p_pat)))
+			self.wildcards.append(b"-path " + AdbShell.shell_quote("./" + p_pat))
 
 		self.active = len(self.filename_patterns) + len(self.path_patterns) > 0
 
-	@staticmethod
-	def wild2re(prefix: str, pattern: str, suffix: str):
-		out = []
-		for part in pattern.split(r'\*'):
-			subout = []
-			for subpart in part.split(r'*'):
-				subout.append(re.escape(subpart))
-			out.append(r'[^/]*'.join(subout))
-		return re.compile(prefix + r'\*'.join(out) + suffix)
-
 	def match(self, fullpath, filename) -> bool:
 		for pattern in self.filename_patterns:
-			if pattern.search(filename):
+			if pattern.match(filename):
 				return True
 		for pattern in self.path_patterns:
-			if pattern.search(fullpath):
+			if pattern.match(fullpath):
 				return True
 		return False
 
@@ -224,8 +224,17 @@ class common_utils(object):
 	# delete files and folders: done in reverse order so a folder's contents
 	# are deleted before the folder itself
 	def delete_files(self, files_to_delete: List[File]) -> None:
+		ignore_parents = set()
+
 		for file in reversed(files_to_delete):
-			if file.type == 'f':
+			if file.ignore or file.name in ignore_parents:
+				log.info("Not deleting:", file.name)
+
+				# don't delete an ignored file's parent dir
+				parent_dir = file.name.rpartition("/")[0]
+				if parent_dir != "":
+					ignore_parents.add(parent_dir)
+			elif file.type == 'f':
 				try:
 					if not g.dry_run:
 						self.rm(file.name)
@@ -439,17 +448,30 @@ class AdbOS(common_utils):
 		super().__init__(base_dir)
 
 	# Sends a find command via adb without waiting for output
-	def prepare_walk(self, follow_symlinks: bool = False) -> None:
+	def prepare_walk(self, exclude: wild_card_search, follow_symlinks: bool = False) -> None:
 		if not self.base_dir_exists:
 			return
 
+		# follow symlinks?
 		if follow_symlinks:
-			self.shell.capture_stdout(b'find -L . -exec stat -Lc "//%f|%s|%Y|%n" {} \\+')
+			cmd = b'find -L . '
+			stat_opts = b'-Lc'
 		else:
-			self.shell.capture_stdout(b'find . -exec stat -c "//%f|%s|%Y|%n" {} \\+')
+			cmd = b'find . '
+			stat_opts = b'-c'
+
+		# handle ignored files
+		if exclude.active:
+			cmd += b' \\( ' + b' -o '.join(exclude.wildcards) + b' \\)  -prune '
+			cmd += b' -exec stat ' + stat_opts + b' "//Y|%f|%s|%Y|%n" {} \\+ -o '
+
+		cmd += b' -exec stat ' + stat_opts + b' "//N|%f|%s|%Y|%n" {} \\+'
+
+		# run command
+		self.shell.capture_stdout(cmd)
 
 	# Now read the output from the previous function
-	def do_walk(self, exclude: wile_card_search) -> List[File]:
+	def do_walk(self) -> List[File]:
 		file_list = []
 
 		if not self.base_dir_exists:
@@ -458,7 +480,7 @@ class AdbOS(common_utils):
 		for line in self.shell:
 			if line[0:2] == b'//':
 				try:
-					mode, size, mtime, filename = line[2:].split(b'|', 3)
+					ignore, mode, size, mtime, filename = line[2:].split(b'|', 4)
 				except ValueError:
 					log.exit("Parsing error: corrupt stat output")
 
@@ -481,7 +503,7 @@ class AdbOS(common_utils):
 				filename = filename[2:].decode('UTF-8', 'surrogateescape')
 
 				# add file
-				file_list.append(File(filename, mode, mtime, size))
+				file_list.append(File(filename, mode, mtime, size, ignore == b'Y'))
 			else:
 				# rare (!) filename with newline char(s)
 				try:
@@ -493,29 +515,6 @@ class AdbOS(common_utils):
 			log.err(self.shell.last_error)
 			log.exit("Failed to fully index Android directory")
 
-		# now filter for "ignored" files and folders
-		if exclude.active:
-			ignore_dir_contents = False
-			ignored_dir_length = None
-			for file in file_list:
-				if ignore_dir_contents:
-					try:
-						if file.name[ignored_dir_length] == '/':
-							file.ignore = True
-							continue
-					except IndexError:
-						pass
-
-					ignore_dir_contents = False
-
-				if exclude.match(file.name, file.name.rpartition('/')[2]):
-					file.ignore = True
-
-					# also mark a directory's content as ignored
-					if file.type == 'd':
-						ignored_dir_length = len(file.name)
-						ignore_dir_contents = True
-
 		return file_list
 
 	# pull a file from the device to the host pc
@@ -523,7 +522,7 @@ class AdbOS(common_utils):
 		src = self.base_dir + '/' + filename
 		dst = dst_base_dir + '/' + linux2mac(filename)
 
-		log.info("Pulling:", src)
+		log.info("Pulling:", filename)
 
 		if g.dry_run:
 			return 0
@@ -615,18 +614,18 @@ class LocalOS(common_utils):
 		super().__init__(base_dir)
 
 	# This method always returns normalised utf-8
-	def walk_files(self, follow_symlinks: bool, exclude: wile_card_search) -> List[File]:
+	def walk_files(self, follow_symlinks: bool, exclude: wild_card_search) -> List[File]:
 		file_list = []
 
 		if not self.base_dir_exists:
 			return file_list
 
-		def crawl(directory, prefix: str = '', ignore: bool = False) -> None:
+		def crawl(directory, prefix: str = '') -> None:
 			for e in os.scandir(directory):
 				name = mac2linux(e.name)
 				st = e.stat(follow_symlinks=follow_symlinks)
 
-				ignore_file = ignore or exclude.match(prefix + name, name)
+				ignore_file = exclude.match(prefix + name, name)
 
 				# add entry for this file/folder
 				file_list.append(File(
@@ -636,9 +635,9 @@ class LocalOS(common_utils):
 					st.st_size,
 					ignore_file))
 
-				# recurse
-				if stat.S_ISDIR(st.st_mode):
-					crawl(e.path, prefix + name + '/', ignore_file)
+				# recurse for non-ignored dirs
+				if not ignore_file and stat.S_ISDIR(st.st_mode):
+					crawl(e.path, prefix + name + '/')
 
 		try:
 			crawl('.')
@@ -651,7 +650,7 @@ class LocalOS(common_utils):
 		src = self.base_dir + '/' + linux2mac(filename)
 		dst = dst_base_dir + '/' + filename
 
-		log.info("Pushing: ", src)
+		log.info("Pushing: ", filename)
 
 		if g.dry_run:
 			return 0
@@ -836,15 +835,14 @@ def find_potential_moved_pairs(src_list: List[File], dst_list: List[File]
 def transfer_files(src_os, dst_os, files: List[File]) -> None:
 	for file in files:
 		if file.ignore:
-			log.debug("Ignoring:", file.name)
-		else:
-			if file.type == 'f':
-				rv = src_os.transfer(file.name, dst_os.base_dir)
+			log.info("Not copying", file.name)
+		elif file.type == 'f':
+			rv = src_os.transfer(file.name, dst_os.base_dir)
 
-				if rv != 0:
-					log.exit("File transfer error: ", file.name)
-			elif file.type == 'd':
-				dst_os.create_directory(file.name)
+			if rv != 0:
+				log.exit("File transfer error: ", file.name)
+		elif file.type == 'd':
+			dst_os.create_directory(file.name)
 
 
 # 1. The prepare_checksums method send one long command to the device.
@@ -865,16 +863,18 @@ def run_checksum(src_os, dst_os, src_to_check: List[File], dst_to_check: List[Fi
 
 # Much like the above: device command is run first, then local files are indexed, then device
 # file info is collected
-def run_walk(src_os, dst_os, follow_symlinks: bool, exclude: wile_card_search
+def run_walk(src_os, dst_os, follow_symlinks: bool, exclude: wild_card_search
 		) -> Tuple[List[File], List[File]]:
 	if hasattr(dst_os, 'prepare_walk'):
-		dst_os.prepare_walk(False)
+		# device is destination
+		dst_os.prepare_walk(exclude, False)
 		src_md5 = src_os.walk_files(follow_symlinks, exclude)
-		dst_md5 = dst_os.do_walk(exclude)
+		dst_md5 = dst_os.do_walk()
 	else:
-		src_os.prepare_walk(follow_symlinks)
+		# device is source
+		src_os.prepare_walk(exclude, follow_symlinks)
 		dst_md5 = dst_os.walk_files(False, exclude)
-		src_md5 = src_os.do_walk(exclude)
+		src_md5 = src_os.do_walk()
 	return src_md5, dst_md5
 
 
@@ -971,7 +971,9 @@ def run_adb_sync() -> None:
 		action='append',
 		default=[],
 		help='Like --exclude but wildcards are matched against the begining of the (relative) file '
-		'path instead of the filename.')
+		'path instead of the filename. Eg to exlcude the Music folder in the folder sdcard you would '
+		'run `adb-sync -r --exclude-path Music /sdcard /home/user/destdir`. NB Always use forward '
+		'slashes for path delimiters even on Windows.')
 	options.add_argument(
 		'-a',
 		'--adb',
@@ -1033,8 +1035,31 @@ def run_adb_sync() -> None:
 		src_os = LocalOS(args.source, False)
 		dst_os = AdbOS(args.destination, True)
 
-	# wild card
-	exclude = wile_card_search(args.exclude, args.exclude_path)
+	# wild cards
+	for fn_pat in args.exclude:
+		if '/' in fn_pat:
+			log.exit("Error: --exclude matches against basename, not path")
+
+	forward_slash_rep = re.compile('//+')
+	p_pat = args.exclude_path
+	for i in range(len(args.exclude_path)):
+		# raise error for absolute paths
+		if p_pat[i][0] == '/':
+			log.exit("Error: --exclude-path only works with relative paths (from the source of "
+				"the destination dir)")
+
+		# replace repeat slashes
+		p_pat[i] = forward_slash_rep.sub("/", p_pat[i])
+
+		# remove unnecessary ./ prefix
+		if p_pat[i][0:2] == "./":
+			p_pat[i] = p_pat[i][2:]
+
+		# and any trailing slashes
+		if p_pat[i][-1] == "/":
+			p_pat[i] = p_pat[i][:-1]
+
+	exclude = wild_card_search(args.exclude, p_pat)
 
 	log.info("Indexing files")
 	src_files, dst_files = run_walk(src_os, dst_os, args.follow_symlinks, exclude)
