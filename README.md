@@ -10,7 +10,7 @@ This project originally started out as a patch of Google's [adb-sync](https://gi
 ### Requirements
 * A working [adb command](https://www.xda-developers.com/install-adb-windows-macos-linux/) on you pc.
 * An Android device which [adb debugging enabled](https://developer.android.com/studio/debug/dev-options).
-* An Android device which a reasonably recent version of [toybox](https://github.com/landley/toybox) (>= 0.7.1).
+* An Android device which a reasonably recent version of [toybox](https://github.com/landley/toybox) (>= 0.8.1).
 * Python 3
 
 ### Installation
