@@ -35,23 +35,28 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import List, Tuple, NoReturn, Any, ClassVar
     from collections.abc import Callable
-    from mypy_extensions import (VarArg, KwArg)
+    from mypy_extensions import VarArg, KwArg
 
 # This prevents errors when printing malformed utf8 filenames to stdout
-if sys.stdout.encoding == 'UTF-8':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, errors="surrogateescape", line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, errors="surrogateescape", line_buffering=True)
+if sys.stdout.encoding == "UTF-8":
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, errors="surrogateescape", line_buffering=True
+    )
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, errors="surrogateescape", line_buffering=True
+    )
 
 # Functions to handle unicode normalisation on MacOS
 # Mac uses a subset of unicode in filenames
-if hasattr(os, 'uname') and os.uname().sysname == 'Darwin':
+if hasattr(os, "uname") and os.uname().sysname == "Darwin":
     import unicodedata
 
     def mac2linux(s: str) -> str:
-        return unicodedata.normalize('NFC', s)
+        return unicodedata.normalize("NFC", s)
 
     def linux2mac(s: str) -> str:
-        return unicodedata.ucd_3_2_0.normalize('NFD', s)
+        return unicodedata.ucd_3_2_0.normalize("NFD", s)
+
 else:
     def mac2linux(s: str) -> str:
         return s
@@ -61,7 +66,7 @@ else:
 
 
 # logging and error handling
-class log():
+class log:
     DEBUG: ClassVar[int] = 1
     QUIET: ClassVar[int] = 2
     NORMAL: ClassVar[int] = 3
@@ -112,23 +117,25 @@ class log():
 
 
 # some global vars
-class g():
-    adb_cmd: ClassVar[list[str]] = ['adb']
+class g:
+    adb_cmd: ClassVar[list[str]] = ["adb"]
     dry_run: ClassVar[bool] = False
 
 
 # class to handle file metadata
-class File():
+class File:
     type_index: ClassVar = {
-        4: 'd',
-        8: 'f',
-        10: 'l',
-        b'd': 'd',
-        b'-': 'f',
-        b'l': 'l',
+        4: "d",
+        8: "f",
+        10: "l",
+        b"d": "d",
+        b"-": "f",
+        b"l": "l",
     }
 
-    def __init__(self, name: str, type: (bytes | int), mtime: int, size: int, ignore: bool = False) -> None:
+    def __init__(
+        self, name: str, type: bytes | int, mtime: int, size: int, ignore: bool = False
+    ) -> None:
         self.name = name
         self.ignore = ignore
 
@@ -156,7 +163,7 @@ class File():
 
     @staticmethod
     def sort_by_size_and_time(o: File) -> Tuple[int, int]:
-        if o.ignore or o.type != 'f':
+        if o.ignore or o.type != "f":
             return 0, 0
         else:
             return o.size, o.mtime
@@ -164,7 +171,7 @@ class File():
 
 # converts wildcard search to regular expressions and then
 # stores the compiled REs for subsequent use
-class wild_card_search():
+class wild_card_search:
     def __init__(self, filename_patterns: list[str], path_patterns: list[str]) -> None:
         self.filename_patterns = []
         self.path_patterns = []
@@ -197,7 +204,7 @@ class wild_card_search():
 
 # class for generic file functions
 # not for direct use
-class common_utils():
+class common_utils:
     is_target_folder: bool
 
     # abstract
@@ -278,14 +285,14 @@ class common_utils():
                 parent_dir = file.name.rpartition("/")[0]
                 if parent_dir != "":
                     ignore_parents.add(parent_dir)
-            elif file.type == 'f':
+            elif file.type == "f":
                 try:
                     if not g.dry_run:
                         self.rm(file.name)
                     log.info("Deleted file:", file.name)
                 except OSError as e:
                     log.exit_except(e, "File deletion failed:", file.name)
-            elif file.type == 'd':
+            elif file.type == "d":
                 try:
                     if not g.dry_run:
                         self.rmdir(file.name)
@@ -316,10 +323,10 @@ class common_utils():
                 log.exit_except(e, "mkdir failed", path)
 
     # Attempt to move a file, creating the destination directory, if necessary.
-    # Unlike the other methods, move is designed to fail gently and returns success or failure.
-    # Moves may fail because yet-to-be-deleted files are in the way
+    # Unlike the other methods, move is designed to fail gently and returns success or
+    # failure. Moves may fail because yet-to-be-deleted files are in the way
     def move(self, old_path: str, new_path: str) -> bool:
-        container = new_path.rpartition('/')[0]
+        container = new_path.rpartition("/")[0]
 
         if len(container) > 0 and not self.isdir(container):
             try:
@@ -342,13 +349,14 @@ class common_utils():
 
 # This class creates an adb shell to send commands to and receive output.
 # It uses null chars to indicate the end of a command's output
-class AdbShell():
+class AdbShell:
     def __init__(self) -> None:
         stream = subprocess.Popen(
-            [*g.adb_cmd, 'shell', '-T'],
+            [*g.adb_cmd, "shell", "-T"],
             stdout=subprocess.PIPE,
             stdin=subprocess.PIPE,
-            stderr=subprocess.PIPE)
+            stderr=subprocess.PIPE,
+        )
 
         if stream.stdout is None or stream.stdin is None or stream.stderr is None:
             raise Exception("Command failed")
@@ -360,12 +368,12 @@ class AdbShell():
         self.last_command_result = -1
         self.pending = False
         self.crlf = False
-        self.last_error = ''
+        self.last_error = ""
 
         # On Windows adb does lf -> crlf conversion so we have to detect it
         # Doing it this way allows for adb on certain Windows environments
         # which might not have lf -> crlf conversion
-        self.capture_stdout(b'echo hello')
+        self.capture_stdout(b"echo hello")
         response = self.__next__()
         # On Windows the output should be b'hello\r'
         if response[-1] == 13:
@@ -376,29 +384,32 @@ class AdbShell():
         if self.pending:
             log.exit("Command without finishing read")
 
-        self.stdin.write(b" ".join(cmd) + b";"
-            b"echo -ne '\\x00'$?'\\x00';echo -ne '\\x00' >&2\n")
+        self.stdin.write(
+            b" ".join(cmd) + b";" b"echo -ne '\\x00'$?'\\x00';echo -ne '\\x00' >&2\n"
+        )
         self.stdin.flush()
         self.pending = True
         self.last_command_result = -1
-        self.last_error = ''
+        self.last_error = ""
 
     def run_command(self, *cmd: bytes) -> int:
         if self.pending:
             log.exit("Command without finishing read")
 
-        self.stdin.write(b" ".join(cmd) + b" > /dev/null;"
-            b"echo -ne '\\x00'$?'\\x00';echo -ne '\\x00' >&2\n")
+        self.stdin.write(
+            b" ".join(cmd) + b" > /dev/null;"
+            b"echo -ne '\\x00'$?'\\x00';echo -ne '\\x00' >&2\n"
+        )
         self.stdin.flush()
         self.pending = True
-        self.last_error = ''
+        self.last_error = ""
 
         return self.finish_command()
 
     # shell quote and convert to bytes
     @staticmethod
     def shell_quote(arg: str) -> bytes:
-        return shlex.quote(arg).encode('UTF-8', 'surrogateescape')
+        return shlex.quote(arg).encode("UTF-8", "surrogateescape")
 
     # read a byte at a time
     # if an empty string is returned exit with a return code if found
@@ -414,15 +425,15 @@ class AdbShell():
     def read_strerr(self) -> str:
         out = []
         c = self.stderr.read(1)
-        while c != b'\x00' and c != b'':
+        while c != b"\x00" and c != b"":
             out.append(c)
             c = self.stderr.read(1)
 
-        return b''.join(out).decode('UTF-8', 'replace').rstrip()
+        return b"".join(out).decode("UTF-8", "replace").rstrip()
 
     # A readline function which stops when a newline or a null char is received.
-    # Note 1: unlike normal readline functions, newline chars are not appended to the output.
-    # This saves us the trouble of deleting them later on.
+    # Note 1: unlike normal readline functions, newline chars are not appended to the
+    # output. This saves us the trouble of deleting them later on.
     # Note 2: characters received between a newline and a null char are discarded.
     def __next__(self) -> bytes:
         if not self.pending:
@@ -432,13 +443,13 @@ class AdbShell():
         while True:
             char = self.read()
 
-            if char == b'\x00':
+            if char == b"\x00":
                 self.read_return_code()
                 raise StopIteration
-            elif char == b'\n':
+            elif char == b"\n":
                 if self.crlf:
                     line.pop()
-                return b''.join(line)
+                return b"".join(line)
             else:
                 line.append(char)
 
@@ -450,7 +461,7 @@ class AdbShell():
         if not self.pending:
             return self.last_command_result
 
-        while self.read() != b'\x00':
+        while self.read() != b"\x00":
             pass
 
         return self.read_return_code()
@@ -460,13 +471,13 @@ class AdbShell():
     def read_return_code(self) -> int:
         result = []
         char = self.read()
-        while char != b'\x00':
+        while char != b"\x00":
             result.append(char)
             char = self.read()
 
         # set command result
         try:
-            self.last_command_result = int(b''.join(result))
+            self.last_command_result = int(b"".join(result))
         except ValueError:
             log.exit("Command failed to return status")
 
@@ -489,7 +500,7 @@ class AdbOS(common_utils):
         self.is_target_folder = is_target_folder
 
         # Android path must be an absolute unix path
-        if len(base_dir) < 1 or base_dir[0] != '/':
+        if len(base_dir) < 1 or base_dir[0] != "/":
             log.exit("Device directory path must be an absolute path")
 
         # clean up path and make sure it's stored in normal utf-8
@@ -499,19 +510,21 @@ class AdbOS(common_utils):
         super().__init__(base_dir)
 
     # Sends a find command via adb without waiting for output
-    def prepare_walk(self, exclude: wild_card_search, follow_symlinks: bool = False) -> None:
+    def prepare_walk(
+        self, exclude: wild_card_search, follow_symlinks: bool = False
+    ) -> None:
         if not self.base_dir_exists:
             return
 
         # follow symlinks?
         if follow_symlinks:
-            cmd = b'find -L . '
+            cmd = b"find -L . "
         else:
-            cmd = b'find . '
+            cmd = b"find . "
 
         # handle ignored files
         if exclude.active:
-            cmd += b' \\( ' + b' -o '.join(exclude.wildcards) + b' \\)  -prune '
+            cmd += b" \\( " + b" -o ".join(exclude.wildcards) + b" \\)  -prune "
             cmd += b' -printf "//Y|%M|%s|%T@|%p\\n" -o '
 
         cmd += b' -printf "//N|%M|%s|%T@|%p\\n" '
@@ -527,17 +540,19 @@ class AdbOS(common_utils):
             return file_list
 
         for line in self.shell:
-            if line[0:2] == b'//':
+            if line[0:2] == b"//":
                 try:
-                    ignore, mode, size_bytes, mtime_bytes, filename_bytes = line[2:].split(b'|', 4)
+                    ignore, mode, size_bytes, mtime_bytes, filename_bytes = line[
+                        2:
+                    ].split(b"|", 4)
                 except ValueError:
                     log.exit("Parsing error: corrupt stat output")
 
                 # skip the parent directory itself
-                if filename_bytes == b'.':
+                if filename_bytes == b".":
                     continue
 
-                if filename_bytes[0:2] != b'./' or len(filename_bytes) < 3:
+                if filename_bytes[0:2] != b"./" or len(filename_bytes) < 3:
                     log.exit("Parsing error: corrupt stat output")
 
                 # Get the values we're interested in.
@@ -548,14 +563,14 @@ class AdbOS(common_utils):
                     log.exit("Stat parsing error: corrupt output")
 
                 # strip off leading './' and convert to unicode
-                filename = filename_bytes[2:].decode('UTF-8', 'surrogateescape')
+                filename = filename_bytes[2:].decode("UTF-8", "surrogateescape")
 
                 # add file
-                file_list.append(File(filename, mode[0:1], mtime, size, ignore == b'Y'))
+                file_list.append(File(filename, mode[0:1], mtime, size, ignore == b"Y"))
             else:
                 # rare (!) filename with newline char(s)
                 try:
-                    file_list[-1].name += '\n' + line.decode('UTF-8', 'surrogateescape')
+                    file_list[-1].name += "\n" + line.decode("UTF-8", "surrogateescape")
                 except IndexError:
                     log.exit("Stat parsing error: corrupt output")
 
@@ -567,8 +582,8 @@ class AdbOS(common_utils):
 
     # pull a file from the device to the host pc
     def transfer(self, filename: str, dst_base_dir: str) -> int:
-        src = self.base_dir + '/' + filename
-        dst = dst_base_dir + '/' + linux2mac(filename)
+        src = self.base_dir + "/" + filename
+        dst = dst_base_dir + "/" + linux2mac(filename)
 
         log.info("Pulling:", filename)
 
@@ -576,7 +591,9 @@ class AdbOS(common_utils):
             return 0
 
         try:
-            return subprocess.call([*g.adb_cmd, 'pull', '-a', src, dst], stdout=log.adb_stdout)
+            return subprocess.call(
+                [*g.adb_cmd, "pull", "-a", src, dst], stdout=log.adb_stdout
+            )
         except:  # catch all interrupts
             return -1
 
@@ -585,8 +602,8 @@ class AdbOS(common_utils):
     # thus simplifying output processing.
     def prepare_checksums(self, device_files: List[File]) -> None:
         self.shell.capture_stdout(
-            b'md5sum -b',
-            *[AdbShell.shell_quote(f.name) for f in device_files])
+            b"md5sum -b", *[AdbShell.shell_quote(f.name) for f in device_files]
+        )
 
     # Process the output of the previous function
     def get_checksums(self, expected_num: int) -> List[str]:
@@ -594,13 +611,13 @@ class AdbOS(common_utils):
 
         for md5 in self.shell:
             if len(md5) != 32:
-                log.exit("md5 parsing error", md5.decode('UTF-8', 'replace'))
+                log.exit("md5 parsing error", md5.decode("UTF-8", "replace"))
 
             for c in md5:
                 if c < 48 or (c > 57 and c < 97) or c > 102:
-                    log.exit("md5 parsing error", md5.decode('UTF-8', 'replace'))
+                    log.exit("md5 parsing error", md5.decode("UTF-8", "replace"))
 
-            device_md5.append(md5.decode('ascii'))
+            device_md5.append(md5.decode("ascii"))
 
         # a different number of cksums means somethings gone wrong
         if self.shell.finish_command() != 0 or expected_num != len(device_md5):
@@ -621,28 +638,30 @@ class AdbOS(common_utils):
 
     def isdir(self, path: str) -> bool:
         escaped_path = AdbShell.shell_quote(path)
-        return self.shell.run_command(b'test -d', escaped_path) == 0
+        return self.shell.run_command(b"test -d", escaped_path) == 0
 
     def mkdir(self, path: str) -> None:
         escaped_path = AdbShell.shell_quote(path)
-        if self.shell.run_command(b'mkdir -p', escaped_path) != 0:
+        if self.shell.run_command(b"mkdir -p", escaped_path) != 0:
             raise OSError("mkdir failed: " + self.shell.last_error)
 
     def mv(self, old_path: str, new_path: str) -> None:
         escaped_old_path = AdbShell.shell_quote(old_path)
         escaped_new_path = AdbShell.shell_quote(new_path)
-        if self.shell.run_command(b'mv', escaped_old_path, escaped_new_path) != 0:
+        if self.shell.run_command(b"mv", escaped_old_path, escaped_new_path) != 0:
             raise OSError("mv failed: " + self.shell.last_error)
 
     def touch(self, path: str, time: int) -> None:
         escaped_path = AdbShell.shell_quote(path)
-        timestamp = datetime.datetime.utcfromtimestamp(time).isoformat().encode('ascii') + b'Z'
-        if self.shell.run_command(b'touch -cd', timestamp, escaped_path) != 0:
+        timestamp = (
+            datetime.datetime.utcfromtimestamp(time).isoformat().encode("ascii") + b"Z"
+        )
+        if self.shell.run_command(b"touch -cd", timestamp, escaped_path) != 0:
             raise OSError("touch failed: " + self.shell.last_error)
 
     def cd(self, path: str) -> None:
         escaped_path = AdbShell.shell_quote(path)
-        if self.shell.run_command(b'cd', escaped_path) != 0:
+        if self.shell.run_command(b"cd", escaped_path) != 0:
             raise OSError("cd failed: " + self.shell.last_error)
 
 
@@ -655,20 +674,22 @@ class LocalOS(common_utils):
         base_dir = linux2mac(os.path.realpath(base_dir))
 
         # Use forward slashes for consistency
-        if os.name == 'nt':
-            base_dir.replace('\\', '/')
+        if os.name == "nt":
+            base_dir.replace("\\", "/")
 
         # attempt to create base dir. We only do this on DST, not SRC
         super().__init__(base_dir)
 
     # This method always returns normalised utf-8
-    def walk_files(self, follow_symlinks: bool, exclude: wild_card_search) -> List[File]:
+    def walk_files(
+        self, follow_symlinks: bool, exclude: wild_card_search
+    ) -> List[File]:
         file_list: list[File] = []
 
         if not self.base_dir_exists:
             return file_list
 
-        def crawl(directory: str, prefix: str = '') -> None:
+        def crawl(directory: str, prefix: str = "") -> None:
             for e in os.scandir(directory):
                 name = mac2linux(e.name)
                 st = e.stat(follow_symlinks=follow_symlinks)
@@ -676,27 +697,30 @@ class LocalOS(common_utils):
                 ignore_file = exclude.match(prefix + name, name)
 
                 # add entry for this file/folder
-                file_list.append(File(
-                    prefix + name,
-                    st.st_mode >> 12,
-                    int(st.st_mtime),
-                    st.st_size,
-                    ignore_file))
+                file_list.append(
+                    File(
+                        prefix + name,
+                        st.st_mode >> 12,
+                        int(st.st_mtime),
+                        st.st_size,
+                        ignore_file,
+                    )
+                )
 
                 # recurse for non-ignored dirs
                 if not ignore_file and stat.S_ISDIR(st.st_mode):
-                    crawl(e.path, prefix + name + '/')
+                    crawl(e.path, prefix + name + "/")
 
         try:
-            crawl('.')
+            crawl(".")
         except OSError as e:
             log.exit_except(e, "Failed to index local directory")
 
         return file_list
 
     def transfer(self, filename: str, dst_base_dir: str) -> int:
-        src = self.base_dir + '/' + linux2mac(filename)
-        dst = dst_base_dir + '/' + filename
+        src = self.base_dir + "/" + linux2mac(filename)
+        dst = dst_base_dir + "/" + filename
 
         log.info("Pushing: ", filename)
 
@@ -704,7 +728,9 @@ class LocalOS(common_utils):
             return 0
 
         try:
-            return subprocess.call([*g.adb_cmd, 'push', src, dst], stdout=log.adb_stdout)
+            return subprocess.call(
+                [*g.adb_cmd, "push", src, dst], stdout=log.adb_stdout
+            )
         except:  # catch all interrupts
             return -1
 
@@ -720,7 +746,7 @@ class LocalOS(common_utils):
 
         time_taken = 0.0
         total_done = i = 0
-        tick = (1024 ** 2) // io.DEFAULT_BUFFER_SIZE
+        tick = (1024**2) // io.DEFAULT_BUFFER_SIZE
         for file in local_files:
             md5 = hashlib.md5()
             f = open(linux2mac(file.name), "rb")
@@ -740,15 +766,20 @@ class LocalOS(common_utils):
                 completed = total_done / total_size
                 time_taken = time.time() - start
                 eta = (time_taken / completed) - time_taken
-                log.info("\rProgress: {:6.1%} (eta {:.1f} seconds)"
-                    "".format(completed, eta), end='')
+                log.info(
+                    "\rProgress: {:6.1%} (eta {:.1f} seconds)"
+                    "".format(completed, eta),
+                    end="",
+                )
                 i = 0
 
             local_md5.append(md5.hexdigest())
             f.close()
 
         time_taken = time.time() - start
-        log.info("\rCompleted checksums in {:.1f} seconds            ".format(time_taken))
+        log.info(
+            "\rCompleted checksums in {:.1f} seconds            ".format(time_taken)
+        )
 
         # a different number of cksums means something has gone wrong
         if len(local_files) != len(local_md5):
@@ -787,8 +818,9 @@ class LocalOS(common_utils):
         os.chdir(path)
 
 
-def diff_file_lists(src: List[File], dst: List[File], clobber: bool
-        ) -> Tuple[List[File], List[Tuple[File, File]], List[File]]:
+def diff_file_lists(
+    src: List[File], dst: List[File], clobber: bool
+) -> Tuple[List[File], List[Tuple[File, File]], List[File]]:
     s = d = 0
 
     src.sort(key=File.sort_by_name)
@@ -802,9 +834,9 @@ def diff_file_lists(src: List[File], dst: List[File], clobber: bool
         if src[s].name == dst[d].name:
             if src[s].ignore or dst[d].ignore:
                 log.debug("Ignoring:", src[s].name)
-            elif src[s].type == 'f' and dst[d].type == 'f':
+            elif src[s].type == "f" and dst[d].type == "f":
                 both.append((src[s], dst[d]))
-            elif src[s].type == 'd' and dst[d].type == 'd':
+            elif src[s].type == "d" and dst[d].type == "d":
                 pass
             elif clobber:
                 log.debug("Clobbering:", src[s].name)
@@ -846,8 +878,9 @@ def diff_file_lists(src: List[File], dst: List[File], clobber: bool
 # 1. files to be uploaded to DST, and
 # 2. files to be deleted on DST.
 # And compares them if see if any of them might be the same file which has been moved.
-def find_potential_moved_pairs(src_list: List[File], dst_list: List[File]
-        ) -> Tuple[List[File], List[File]]:
+def find_potential_moved_pairs(
+    src_list: List[File], dst_list: List[File]
+) -> Tuple[List[File], List[File]]:
     src_to_check = []
     dst_to_check = []
 
@@ -856,10 +889,10 @@ def find_potential_moved_pairs(src_list: List[File], dst_list: List[File]
 
     s = d = 0
     # skip dirs, empty and ignored files
-    while s < len(src) and (src[s].type != 'f' or src[s].size == 0 or src[s].ignore):
+    while s < len(src) and (src[s].type != "f" or src[s].size == 0 or src[s].ignore):
         s += 1
 
-    while d < len(dst) and (dst[d].type != 'f' or dst[d].size == 0 or dst[d].ignore):
+    while d < len(dst) and (dst[d].type != "f" or dst[d].size == 0 or dst[d].ignore):
         d += 1
 
     while s < len(src) and d < len(dst):
@@ -881,24 +914,31 @@ def find_potential_moved_pairs(src_list: List[File], dst_list: List[File]
     return src_to_check, dst_to_check
 
 
-def transfer_files(src_os: common_utils, dst_os: common_utils, files: List[File]) -> None:
+def transfer_files(
+    src_os: common_utils, dst_os: common_utils, files: List[File]
+) -> None:
     for file in files:
         if file.ignore:
             log.info("Not copying", file.name)
-        elif file.type == 'f':
+        elif file.type == "f":
             rv = src_os.transfer(file.name, dst_os.base_dir)
 
             if rv != 0:
                 log.exit("File transfer error: ", file.name)
-        elif file.type == 'd':
+        elif file.type == "d":
             dst_os.create_directory(file.name)
 
 
 # 1. The prepare_checksums method send one long command to the device.
 # 2. We then run get_checksums on the local pc. This method also prints progress info.
-# 3. We then collect checksums obtained from the device which was working in parallel with 2.
-def run_checksum(src_os: common_utils, dst_os: common_utils, src_to_check: List[File], dst_to_check: List[File]
-        ) -> Tuple[List[str], List[str]]:
+# 3. We then collect checksums obtained from the device which was working in parallel
+# with 2.
+def run_checksum(
+    src_os: common_utils,
+    dst_os: common_utils,
+    src_to_check: List[File],
+    dst_to_check: List[File],
+) -> Tuple[List[str], List[str]]:
     if isinstance(dst_os, AdbOS) and isinstance(src_os, LocalOS):
         dst_os.prepare_checksums(dst_to_check)
         src_md5 = src_os.get_checksums(src_to_check)
@@ -908,14 +948,18 @@ def run_checksum(src_os: common_utils, dst_os: common_utils, src_to_check: List[
         dst_md5 = dst_os.get_checksums(dst_to_check)
         src_md5 = src_os.get_checksums(len(src_to_check))
     else:
-        raise Exception('Strange Error')
+        raise Exception("Strange Error")
     return src_md5, dst_md5
 
 
-# Much like the above: device command is run first, then local files are indexed, then device
-# file info is collected
-def run_walk(src_os: common_utils, dst_os: common_utils, follow_symlinks: bool, exclude: wild_card_search
-        ) -> Tuple[List[File], List[File]]:
+# Much like the above: device command is run first, then local files are indexed, then
+# device file info is collected
+def run_walk(
+    src_os: common_utils,
+    dst_os: common_utils,
+    follow_symlinks: bool,
+    exclude: wild_card_search,
+) -> Tuple[List[File], List[File]]:
     if isinstance(dst_os, AdbOS) and isinstance(src_os, LocalOS):
         # device is destination
         dst_os.prepare_walk(exclude, False)
@@ -927,133 +971,141 @@ def run_walk(src_os: common_utils, dst_os: common_utils, follow_symlinks: bool, 
         dst_md5 = dst_os.walk_files(False, exclude)
         src_md5 = src_os.do_walk()
     else:
-        raise Exception('Strange Error')
+        raise Exception("Strange Error")
     return src_md5, dst_md5
 
 
 def run_adb_sync() -> None:
     parser = argparse.ArgumentParser(
-        description='Sync a directory between an Android device and the local file system.',
+        description="Sync a directory between an Android device and the local file "
+        "system.",
         usage="abd-sync [options] SRC DST",
-        epilog="File syncing is inherently dangerous. It's ralatively easy to accidently "
-        "delete lots of files in a fraction of second by typing the wrong command! I strongly "
-        "recommend testing commands using --dry-run before actually running them. You have "
-        "been warned!",
-        add_help=False)
+        epilog="File syncing is inherently dangerous. It's ralatively easy to "
+        "accidently delete lots of files in a fraction of second by typing the wrong "
+        "command! I strongly recommend testing commands using --dry-run before "
+        "actually running them. You have been warned!",
+        add_help=False,
+    )
 
     # main folder args
     dirs = parser.add_argument_group(
-        title='Directories',
-        description='Android file path must be absolute paths. If copying from Android to PC, '
-        'specify the -r option.')
+        title="Directories",
+        description="Android file path must be absolute paths. If copying from Android "
+        " to PC,specify the -r option.",
+    )
 
     dirs.add_argument(
-        'source',
-        metavar='SRC',
-        type=str,
-        help='The source directory to copy from.')
+        "source", metavar="SRC", type=str, help="The source directory to copy from."
+    )
     dirs.add_argument(
-        'destination',
-        metavar='DST',
-        type=str,
-        help='The directory to copy to.')
+        "destination", metavar="DST", type=str, help="The directory to copy to."
+    )
     dirs.add_argument(
-        '-r',
-        '--reverse',
-        action='store_true',
-        help='Sync from Android to be a local folder.')
+        "-r",
+        "--reverse",
+        action="store_true",
+        help="Sync from Android to be a local folder.",
+    )
 
     # async args
     algorithm = parser.add_argument_group(
         title="File Comparison Algorithms",
-        description="The file comparison to use. With the exception of --two-way, file which are "
-        "on SRC but not on DST are always copied from SRC to DST. By default only files which are "
-        "newer on SRC than on DST are copied from SRC to DST."
+        description="The file comparison to use. With the exception of --two-way, file "
+        "which are on SRC but not on DST are always copied from SRC to DST. By default "
+        "only files which are newer on SRC than on DST are copied from SRC to DST.",
     ).add_mutually_exclusive_group()
     algorithm.add_argument(
-        '-f',
-        '--filesize',
-        action='store_true',
-        help='Files with different sizes are copied from SRC to DST. File save times are ignored.')
+        "-f",
+        "--filesize",
+        action="store_true",
+        help="Files with different sizes are copied from SRC to DST. File save times "
+        "are ignored.",
+    )
     algorithm.add_argument(
-        '-c',
-        '--checksum',
-        action='store_true',
-        help="Files with different sizes are copied from SRC to DST. As are files with different "
-        "md5 checksums. File timestampts on DST are also corrected to be the same as those on "
-        "SRC. Checking checksum can take some time. This option's main use is to recover from an "
-        "interruped sync operation which may have left incomplete files behind.")
+        "-c",
+        "--checksum",
+        action="store_true",
+        help="Files with different sizes are copied from SRC to DST. As are files with "
+        "different md5 checksums. File timestampts on DST are also corrected to be the "
+        "same as those on SRC. Checking checksum can take some time. This option's "
+        "main use is to recover from an interruped sync operation which may have left "
+        "incomplete files behind.",
+    )
     algorithm.add_argument(
-        '-2',
-        '--two-way',
-        action='store_true',
-        help='The newer of the files stored on SRC or DST is copied to the other. Files not on '
-        'SRC are copied from DST and files not on DST are copied from SRC. This can result in '
-        'files being undeleted.')
+        "-2",
+        "--two-way",
+        action="store_true",
+        help="The newer of the files stored on SRC or DST is copied to the other. "
+        "Files not on SRC are copied from DST and files not on DST are copied from "
+        "SRC. This can result in files being undeleted.",
+    )
 
     options = parser.add_argument_group(title="Options")
     options.add_argument(
-        '-d',
-        '--delete',
-        action='store_true',
-        help='Delete files from DST that are not present on SRC. This also deletes files to make '
-        'way for and directories and vice-versa.')
+        "-d",
+        "--delete",
+        action="store_true",
+        help="Delete files from DST that are not present on SRC. This also deletes "
+        "files to make way for and directories and vice-versa.",
+    )
     options.add_argument(
-        '-m',
-        '--sniff-moves',
-        action='store_true',
-        help='Search for moved and renamed files. These can be moved on DST instead of being '
-        'deleted and pushed. Uses md5 checksums.')
+        "-m",
+        "--sniff-moves",
+        action="store_true",
+        help="Search for moved and renamed files. These can be moved on DST instead of "
+        "being deleted and pushed. Uses md5 checksums.",
+    )
     options.add_argument(
-        '--follow-symlinks',
-        action='store_true',
+        "--follow-symlinks",
+        action="store_true",
         default=False,
-        help='Follow symbolic links when indexing SRC. No attempt is made to recreate links on '
-        'DST, so a link to a directory on SRC will be created as a directory on DST, and links to '
-        'to files will be copies as files. Adb-sync will quit if any symlinks are found on DST, '
-        'or, when not following symlinks, are found on SRC. (Default: False)')
+        help="Follow symbolic links when indexing SRC. No attempt is made to recreate "
+        "links on DST, so a link to a directory on SRC will be created as a directory "
+        "on DST, and links to to files will be copies as files. Adb-sync will quit if "
+        "any symlinks are found on DST, or, when not following symlinks, are found on "
+        "SRC. (Default: False)",
+    )
     options.add_argument(
-        '--exclude',
-        action='append',
+        "--exclude",
+        action="append",
         default=[],
-        help='Exclude files and directories. Wildcard match against filenames not paths. Can be '
-        'specified multiple times. Excluded files are not transferred to DST but may be deleted '
-        'from DST with the --delete option.')
+        help="Exclude files and directories. Wildcard match against filenames not "
+        "paths. Can be specified multiple times. Excluded files are not transferred to "
+        "DST but may be deleted from DST with the --delete option.",
+    )
     options.add_argument(
-        '--exclude-path',
-        action='append',
+        "--exclude-path",
+        action="append",
         default=[],
-        help='Like --exclude but wildcards are matched against the begining of the (relative) file '
-        'path instead of the filename. Eg to exlcude the Music folder in the folder sdcard you would '
-        'run `adb-sync -r --exclude-path Music /sdcard /home/user/destdir`. NB Always use forward '
-        'slashes for path delimiters even on Windows.')
+        help="Like --exclude but wildcards are matched against the begining of the "
+        "(relative) file path instead of the filename. Eg to exlcude the Music folder "
+        "in the folder sdcard you would run `adb-sync -r --exclude-path Music /sdcard "
+        "/home/user/destdir`. NB Always use forward slashes for path delimiters even "
+        "on Windows.",
+    )
     options.add_argument(
-        '-a',
-        '--adb',
+        "-a",
+        "--adb",
         type=str,
-        metavar='CMD',
-        help='the adb instance to use (e.g. -a "/path/to/adb" or -a "adb -P 1234")')
+        metavar="CMD",
+        help='the adb instance to use (e.g. -a "/path/to/adb" or -a "adb -P 1234")',
+    )
     options.add_argument(
-        '-n',
-        '--dry-run',
-        action='store_true',
-        help='Do not do anything, just show what would be done.')
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="Do not do anything, just show what would be done.",
+    )
     options.add_argument(
-        '-h',
-        '--help',
-        action='help',
-        help='Show this help message and exit.')
+        "-h", "--help", action="help", help="Show this help message and exit."
+    )
     logging = options.add_mutually_exclusive_group()
     logging.add_argument(
-        '-q',
-        '--quiet',
-        action='store_true',
-        help='Hide warning and progress messages.')
+        "-q", "--quiet", action="store_true", help="Hide warning and progress messages."
+    )
     logging.add_argument(
-        '-v',
-        '--verbose',
-        action='store_true',
-        help='Print some extra messages.')
+        "-v", "--verbose", action="store_true", help="Print some extra messages."
+    )
     args = parser.parse_args()
 
     # logging
@@ -1093,16 +1145,18 @@ def run_adb_sync() -> None:
 
     # wild cards
     for fn_pat in args.exclude:
-        if '/' in fn_pat:
+        if "/" in fn_pat:
             log.exit("Error: --exclude matches against basename, not path")
 
-    forward_slash_rep = re.compile('//+')
+    forward_slash_rep = re.compile("//+")
     p_pat = args.exclude_path
     for i in range(len(args.exclude_path)):
         # raise error for absolute paths
-        if p_pat[i][0] == '/':
-            log.exit("Error: --exclude-path only works with relative paths (from the source of "
-                "the destination dir)")
+        if p_pat[i][0] == "/":
+            log.exit(
+                "Error: --exclude-path only works with relative paths (from the source"
+                " of the destination dir)"
+            )
 
         # replace repeat slashes
         p_pat[i] = forward_slash_rep.sub("/", p_pat[i])
@@ -1123,23 +1177,25 @@ def run_adb_sync() -> None:
     # following symlinks would overcomplicate two-way sync
     if args.two_way:
         for file in src_files:
-            if file.type == 'l':
+            if file.type == "l":
                 log.exit("Symbolic link found in SRC:", file.name)
 
     # if we are following symbolic links there shouldn't be any there
     elif not args.follow_symlinks:
         for file in src_files:
-            if file.type == 'l':
+            if file.type == "l":
                 log.info("Warning: not following symbolic link:", file.name)
                 file.ignore = True
 
     # carp if we find a symbolic link in DST
     for file in dst_files:
-        if file.type == 'l':
+        if file.type == "l":
             log.exit("Symbolic link found in DST:", file.name)
 
     log.info("Comparing file lists")
-    to_push, file_pairs_to_check, to_delete = diff_file_lists(src_files, dst_files, args.delete)
+    to_push, file_pairs_to_check, to_delete = diff_file_lists(
+        src_files, dst_files, args.delete
+    )
     del src_files
     del dst_files
 
@@ -1154,7 +1210,9 @@ def run_adb_sync() -> None:
             elif src.mtime < dst.mtime:
                 dst_to_src.append(dst)
             elif src.size != dst.size:
-                log.info("Warning", src.name, "has the same modified time but varies in size")
+                log.info(
+                    "Warning", src.name, "has the same modified time but varies in size"
+                )
 
         if len(src_to_dst) == 0 and len(dst_to_src) == 0:
             log.info("Not copying any files")
@@ -1181,7 +1239,9 @@ def run_adb_sync() -> None:
                 log.info("Not checking any file moves")
             else:
                 log.info("Doing checksum for file move check")
-                src_md5, dst_md5 = run_checksum(src_os, dst_os, src_to_check, dst_to_check)
+                src_md5, dst_md5 = run_checksum(
+                    src_os, dst_os, src_to_check, dst_to_check
+                )
 
                 for i in range(len(src_md5)):
                     if src_md5[i] == dst_md5[i]:
@@ -1229,7 +1289,12 @@ def run_adb_sync() -> None:
             if src.mtime > dst.mtime:
                 to_push.append(src)
             elif src.mtime < dst.mtime:
-                log.info(src.name, "is newer on DST than version on SRC", src.mtime, dst.mtime)
+                log.info(
+                    src.name,
+                    "is newer on DST than version on SRC",
+                    src.mtime,
+                    dst.mtime,
+                )
             elif src.size != dst.size:
                 log.info(src.name, "has the same modified time but file size varies")
 
@@ -1268,5 +1333,5 @@ def main() -> None:
         exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
