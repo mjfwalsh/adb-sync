@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple
+from __future__ import annotations
+
 import argparse
 import datetime
 import hashlib
@@ -28,6 +29,13 @@ import posixpath
 import sys
 import re
 import fnmatch
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import List, Tuple, NoReturn, Any, ClassVar
+    from collections.abc import Callable
+    from mypy_extensions import (VarArg, KwArg)
 
 # This prevents errors when printing malformed utf8 filenames to stdout
 if sys.stdout.encoding == 'UTF-8':
@@ -53,27 +61,32 @@ else:
 
 
 # logging and error handling
-class log(object):
-    DEBUG = 1
-    QUIET = 2
-    NORMAL = 3
+class log():
+    DEBUG: ClassVar[int] = 1
+    QUIET: ClassVar[int] = 2
+    NORMAL: ClassVar[int] = 3
+
+    adb_stdout: ClassVar[int | None] = None
+    level: ClassVar[int] = NORMAL
+    info: ClassVar[Callable[[VarArg(Any), KwArg(Any)], None]]
+    debug: ClassVar[Callable[[VarArg(Any), KwArg(Any)], None]]
 
     @staticmethod
-    def ignore(*argv, **kwargs) -> None:
+    def ignore(*argv: str, **kwargs: str) -> None:
         pass
 
     @staticmethod
-    def err(*argv, **kwargs) -> None:
-        print(*argv, **kwargs, file=sys.stderr)
+    def err(*argv: str) -> None:
+        print(*argv, file=sys.stderr)
 
     @staticmethod
-    def exit(*argv, **kwargs) -> None:
-        print(*argv, **kwargs, file=sys.stderr)
+    def exit(*argv: str) -> NoReturn:
+        print(*argv, file=sys.stderr)
         print("Aborting sync...", file=sys.stderr)
         exit(1)
 
     @staticmethod
-    def exit_except(ex: Exception, *argv, **kwargs) -> None:
+    def exit_except(ex: Exception, *argv: str, **kwargs: Any) -> NoReturn:
         s = str(ex)
         if len(s) > 0:
             print(*argv, s, **kwargs, file=sys.stderr)
@@ -97,22 +110,16 @@ class log(object):
             log.debug = log.ignore
             log.adb_stdout = None
 
-    # defaults
-    info = print
-    debug = ignore
-    adb_stdout = None
-    level = NORMAL
-
 
 # some global vars
-class g(object):
-    adb_cmd = ['adb']
-    dry_run = False
+class g():
+    adb_cmd: ClassVar[list[str]] = ['adb']
+    dry_run: ClassVar[bool] = False
 
 
 # class to handle file metadata
-class File(object):
-    type_index = {
+class File():
+    type_index: ClassVar = {
         4: 'd',
         8: 'f',
         10: 'l',
@@ -121,7 +128,7 @@ class File(object):
         b'l': 'l',
     }
 
-    def __init__(self, name: str, type, mtime: int, size: int, ignore: bool = False) -> None:
+    def __init__(self, name: str, type: (bytes | int), mtime: int, size: int, ignore: bool = False) -> None:
         self.name = name
         self.ignore = ignore
 
@@ -129,7 +136,7 @@ class File(object):
         try:
             self.type = File.type_index[type]
         except KeyError:
-            log.exit("Found unsupported file type:", type)
+            log.exit("Found unsupported file type:", str(type))
 
         # FAT is only accurate to even numbered seconds
         self.mtime = mtime - (mtime % 2)
@@ -137,18 +144,18 @@ class File(object):
         # Size in bytes
         self.size = size
 
-    def __eq__(self, other) -> bool:
-        return self.name == other.name
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, File) and self.name == other.name
 
     def __hash__(self) -> int:
         return hash(self.name)
 
     @staticmethod
-    def sort_by_name(o) -> str:
+    def sort_by_name(o: File) -> str:
         return o.name
 
     @staticmethod
-    def sort_by_size_and_time(o) -> Tuple[int, int]:
+    def sort_by_size_and_time(o: File) -> Tuple[int, int]:
         if o.ignore or o.type != 'f':
             return 0, 0
         else:
@@ -157,8 +164,8 @@ class File(object):
 
 # converts wildcard search to regular expressions and then
 # stores the compiled REs for subsequent use
-class wild_card_search(object):
-    def __init__(self, filename_patterns, path_patterns) -> None:
+class wild_card_search():
+    def __init__(self, filename_patterns: list[str], path_patterns: list[str]) -> None:
         self.filename_patterns = []
         self.path_patterns = []
         self.wildcards = []
@@ -178,7 +185,7 @@ class wild_card_search(object):
 
         self.active = len(self.filename_patterns) + len(self.path_patterns) > 0
 
-    def match(self, fullpath, filename) -> bool:
+    def match(self, fullpath: str, filename: str) -> bool:
         for pattern in self.filename_patterns:
             if pattern.match(filename):
                 return True
@@ -190,7 +197,40 @@ class wild_card_search(object):
 
 # class for generic file functions
 # not for direct use
-class common_utils(object):
+class common_utils():
+    is_target_folder: bool
+
+    # abstract
+    def cd(self, arg: str) -> None:
+        pass
+
+    # abstract
+    def isdir(self, arg: str) -> bool:
+        return False
+
+    # abstract
+    def mkdir(self, arg: str) -> None:
+        pass
+
+    # abstract
+    def mv(self, old: str, new: str) -> None:
+        pass
+
+    # abstract
+    def rm(self, arg: str) -> None:
+        pass
+
+    # abstract
+    def rmdir(self, arg: str) -> None:
+        pass
+
+    # abstract
+    def touch(self, arg: str, time: int) -> None:
+        pass
+
+    # abstract
+    def transfer(self, filename: str, dst_base_dir: str) -> int:
+        return -1
 
     # Error if source dir does not exist,
     # create target dir if it doesn't exist, and
@@ -302,13 +342,20 @@ class common_utils(object):
 
 # This class creates an adb shell to send commands to and receive output.
 # It uses null chars to indicate the end of a command's output
-class AdbShell(object):
+class AdbShell():
     def __init__(self) -> None:
-        self.stream = subprocess.Popen(
+        stream = subprocess.Popen(
             [*g.adb_cmd, 'shell', '-T'],
             stdout=subprocess.PIPE,
             stdin=subprocess.PIPE,
             stderr=subprocess.PIPE)
+
+        if stream.stdout is None or stream.stdin is None or stream.stderr is None:
+            raise Exception("Command failed")
+
+        self.stdout = stream.stdout
+        self.stdin = stream.stdin
+        self.stderr = stream.stderr
 
         self.last_command_result = -1
         self.pending = False
@@ -329,9 +376,9 @@ class AdbShell(object):
         if self.pending:
             log.exit("Command without finishing read")
 
-        self.stream.stdin.write(b" ".join(cmd) + b";"
+        self.stdin.write(b" ".join(cmd) + b";"
             b"echo -ne '\\x00'$?'\\x00';echo -ne '\\x00' >&2\n")
-        self.stream.stdin.flush()
+        self.stdin.flush()
         self.pending = True
         self.last_command_result = -1
         self.last_error = ''
@@ -340,9 +387,9 @@ class AdbShell(object):
         if self.pending:
             log.exit("Command without finishing read")
 
-        self.stream.stdin.write(b" ".join(cmd) + b" > /dev/null;"
+        self.stdin.write(b" ".join(cmd) + b" > /dev/null;"
             b"echo -ne '\\x00'$?'\\x00';echo -ne '\\x00' >&2\n")
-        self.stream.stdin.flush()
+        self.stdin.flush()
         self.pending = True
         self.last_error = ''
 
@@ -356,7 +403,7 @@ class AdbShell(object):
     # read a byte at a time
     # if an empty string is returned exit with a return code if found
     def read(self) -> bytes:
-        c = self.stream.stdout.read(1)
+        c = self.stdout.read(1)
         if c:
             return c
 
@@ -364,12 +411,12 @@ class AdbShell(object):
         log.exit("Adb error:", self.read_strerr())
 
     # read errors from stderr, ignore utf8 errors and read to EOF if necessary
-    def read_strerr(self) -> None:
+    def read_strerr(self) -> str:
         out = []
-        c = self.stream.stderr.read(1)
+        c = self.stderr.read(1)
         while c != b'\x00' and c != b'':
             out.append(c)
-            c = self.stream.stderr.read(1)
+            c = self.stderr.read(1)
 
         return b''.join(out).decode('UTF-8', 'replace').rstrip()
 
@@ -381,7 +428,7 @@ class AdbShell(object):
         if not self.pending:
             raise StopIteration
 
-        line = []
+        line: list[bytes] = []
         while True:
             char = self.read()
 
@@ -395,7 +442,7 @@ class AdbShell(object):
             else:
                 line.append(char)
 
-    def __iter__(self):
+    def __iter__(self) -> AdbShell:
         return self
 
     # dispose of any remaining output returns the command return code
@@ -432,8 +479,8 @@ class AdbShell(object):
 
     # cleanup
     def __del__(self) -> None:
-        self.stream.stdout.close()
-        self.stream.stdin.close()
+        self.stdout.close()
+        self.stdin.close()
 
 
 class AdbOS(common_utils):
@@ -474,7 +521,7 @@ class AdbOS(common_utils):
 
     # Now read the output from the previous function
     def do_walk(self) -> List[File]:
-        file_list = []
+        file_list: list[File] = []
 
         if not self.base_dir_exists:
             return file_list
@@ -482,26 +529,26 @@ class AdbOS(common_utils):
         for line in self.shell:
             if line[0:2] == b'//':
                 try:
-                    ignore, mode, size, mtime, filename = line[2:].split(b'|', 4)
+                    ignore, mode, size_bytes, mtime_bytes, filename_bytes = line[2:].split(b'|', 4)
                 except ValueError:
                     log.exit("Parsing error: corrupt stat output")
 
                 # skip the parent directory itself
-                if filename == b'.':
+                if filename_bytes == b'.':
                     continue
 
-                if filename[0:2] != b'./' or len(filename) < 3:
+                if filename_bytes[0:2] != b'./' or len(filename_bytes) < 3:
                     log.exit("Parsing error: corrupt stat output")
 
                 # Get the values we're interested in.
                 try:
-                    size = int(size)
-                    mtime = int(float(mtime))
+                    size = int(size_bytes)
+                    mtime = int(float(mtime_bytes))
                 except ValueError:
                     log.exit("Stat parsing error: corrupt output")
 
                 # strip off leading './' and convert to unicode
-                filename = filename[2:].decode('UTF-8', 'surrogateescape')
+                filename = filename_bytes[2:].decode('UTF-8', 'surrogateescape')
 
                 # add file
                 file_list.append(File(filename, mode[0:1], mtime, size, ignore == b'Y'))
@@ -581,10 +628,10 @@ class AdbOS(common_utils):
         if self.shell.run_command(b'mkdir -p', escaped_path) != 0:
             raise OSError("mkdir failed: " + self.shell.last_error)
 
-    def mv(self, old_path: str, new_path: str) -> bool:
-        old_path = AdbShell.shell_quote(old_path)
-        new_path = AdbShell.shell_quote(new_path)
-        if self.shell.run_command(b'mv', old_path, new_path) != 0:
+    def mv(self, old_path: str, new_path: str) -> None:
+        escaped_old_path = AdbShell.shell_quote(old_path)
+        escaped_new_path = AdbShell.shell_quote(new_path)
+        if self.shell.run_command(b'mv', escaped_old_path, escaped_new_path) != 0:
             raise OSError("mv failed: " + self.shell.last_error)
 
     def touch(self, path: str, time: int) -> None:
@@ -616,12 +663,12 @@ class LocalOS(common_utils):
 
     # This method always returns normalised utf-8
     def walk_files(self, follow_symlinks: bool, exclude: wild_card_search) -> List[File]:
-        file_list = []
+        file_list: list[File] = []
 
         if not self.base_dir_exists:
             return file_list
 
-        def crawl(directory, prefix: str = '') -> None:
+        def crawl(directory: str, prefix: str = '') -> None:
             for e in os.scandir(directory):
                 name = mac2linux(e.name)
                 st = e.stat(follow_symlinks=follow_symlinks)
@@ -671,7 +718,8 @@ class LocalOS(common_utils):
         for file in local_files:
             total_size += file.size
 
-        total_done = time_taken = i = 0
+        time_taken = 0.0
+        total_done = i = 0
         tick = (1024 ** 2) // io.DEFAULT_BUFFER_SIZE
         for file in local_files:
             md5 = hashlib.md5()
@@ -725,7 +773,7 @@ class LocalOS(common_utils):
         path = linux2mac(path)
         os.makedirs(path, exist_ok=True)
 
-    def mv(self, old_path: str, new_path: str) -> bool:
+    def mv(self, old_path: str, new_path: str) -> None:
         old_path = linux2mac(old_path)
         new_path = linux2mac(new_path)
         os.rename(old_path, new_path)
@@ -833,7 +881,7 @@ def find_potential_moved_pairs(src_list: List[File], dst_list: List[File]
     return src_to_check, dst_to_check
 
 
-def transfer_files(src_os, dst_os, files: List[File]) -> None:
+def transfer_files(src_os: common_utils, dst_os: common_utils, files: List[File]) -> None:
     for file in files:
         if file.ignore:
             log.info("Not copying", file.name)
@@ -849,33 +897,37 @@ def transfer_files(src_os, dst_os, files: List[File]) -> None:
 # 1. The prepare_checksums method send one long command to the device.
 # 2. We then run get_checksums on the local pc. This method also prints progress info.
 # 3. We then collect checksums obtained from the device which was working in parallel with 2.
-def run_checksum(src_os, dst_os, src_to_check: List[File], dst_to_check: List[File]
+def run_checksum(src_os: common_utils, dst_os: common_utils, src_to_check: List[File], dst_to_check: List[File]
         ) -> Tuple[List[str], List[str]]:
-    if hasattr(dst_os, 'prepare_checksums'):
+    if isinstance(dst_os, AdbOS) and isinstance(src_os, LocalOS):
         dst_os.prepare_checksums(dst_to_check)
         src_md5 = src_os.get_checksums(src_to_check)
         dst_md5 = dst_os.get_checksums(len(dst_to_check))
-    else:
+    elif isinstance(src_os, AdbOS) and isinstance(dst_os, LocalOS):
         src_os.prepare_checksums(src_to_check)
         dst_md5 = dst_os.get_checksums(dst_to_check)
         src_md5 = src_os.get_checksums(len(src_to_check))
+    else:
+        raise Exception('Strange Error')
     return src_md5, dst_md5
 
 
 # Much like the above: device command is run first, then local files are indexed, then device
 # file info is collected
-def run_walk(src_os, dst_os, follow_symlinks: bool, exclude: wild_card_search
+def run_walk(src_os: common_utils, dst_os: common_utils, follow_symlinks: bool, exclude: wild_card_search
         ) -> Tuple[List[File], List[File]]:
-    if hasattr(dst_os, 'prepare_walk'):
+    if isinstance(dst_os, AdbOS) and isinstance(src_os, LocalOS):
         # device is destination
         dst_os.prepare_walk(exclude, False)
         src_md5 = src_os.walk_files(follow_symlinks, exclude)
         dst_md5 = dst_os.do_walk()
-    else:
+    elif isinstance(src_os, AdbOS) and isinstance(dst_os, LocalOS):
         # device is source
         src_os.prepare_walk(exclude, follow_symlinks)
         dst_md5 = dst_os.walk_files(False, exclude)
         src_md5 = src_os.do_walk()
+    else:
+        raise Exception('Strange Error')
     return src_md5, dst_md5
 
 
@@ -1029,6 +1081,9 @@ def run_adb_sync() -> None:
         g.dry_run = True
 
     # src + dst
+    src_os: common_utils
+    dst_os: common_utils
+
     if args.reverse:
         src_os = AdbOS(args.source, False)
         dst_os = LocalOS(args.destination, True)
